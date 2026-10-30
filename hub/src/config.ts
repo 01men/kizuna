@@ -18,7 +18,7 @@ export interface HubConfig {
   publicInstall: boolean;
   /** 允许跨域来源（逗号分隔；默认包含 GitHub Pages） */
   corsOrigins: string[];
-  /** 公开安装令牌的每小时签发上限（按来源 IP） */
+  /** 公开端点（安装/演示）每 IP 每分钟限额；0 表示用设置页的值 */
   publicInstallQuota: number;
 }
 
@@ -71,6 +71,6 @@ export function loadConfig(): HubConfig {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-    publicInstallQuota: Math.max(1, Number(process.env.KIZUNA_PUBLIC_INSTALL_QUOTA ?? 20)),
+    publicInstallQuota: Math.max(0, Number(process.env.KIZUNA_PUBLIC_INSTALL_QUOTA ?? 0)),
   };
 }

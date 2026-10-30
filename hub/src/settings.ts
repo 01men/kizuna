@@ -16,6 +16,14 @@ export interface Settings {
   content_minimized: boolean;
   /** 心跳离线判定窗口（秒），默认 300 */
   heartbeat_window_s: number;
+  /** 公开安装配额：每 IP 每分钟次数，默认 10 */
+  public_install_per_minute: number;
+  /** 演示沙箱配额：每 IP 每分钟次数，默认 10 */
+  demo_per_minute: number;
+  /** 白名单（IP 或 CIDR）：命中后不限流。用于社区机器人/官方巡检/自有固定出口 */
+  rate_limit_allowlist: string[];
+  /** 提额联系方式（超限时展示给访客） */
+  quota_contact: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -26,6 +34,10 @@ export const DEFAULT_SETTINGS: Settings = {
   audit_retention_days: 180,
   content_minimized: true,
   heartbeat_window_s: 300,
+  public_install_per_minute: 10,
+  demo_per_minute: 10,
+  rate_limit_allowlist: [],
+  quota_contact: 'https://github.com/01men/kizuna/issues/new?labels=quota&title=%5B%E6%8F%90%E9%A2%9D%5D+',
 };
 
 const KEY = 'settings_json';
@@ -53,12 +65,14 @@ export function validateSettings(input: unknown): Settings {
     }
     s.retry_ladder_s = o.retry_ladder_s as number[];
   }
-  for (const [k, lo, hi] of [
+for (const [k, lo, hi] of [
     ['ack_timeout_s', 1, 120],
     ['delivery_concurrency', 1, 256],
     ['jitter_s', 0, 300],
     ['audit_retention_days', 1, 3650],
     ['heartbeat_window_s', 30, 3600],
+    ['public_install_per_minute', 1, 600],
+    ['demo_per_minute', 1, 600],
   ] as const) {
     if (o[k] !== undefined) {
       const n = o[k];
@@ -72,7 +86,40 @@ export function validateSettings(input: unknown): Settings {
     if (typeof o.content_minimized !== 'boolean') throw err.validation('content_minimized 必须是布尔值');
     s.content_minimized = o.content_minimized;
   }
+  if (o.rate_limit_allowlist !== undefined) {
+    if (!Array.isArray(o.rate_limit_allowlist)) throw err.validation('rate_limit_allowlist 必须是字符串数组');
+    const list = o.rate_limit_allowlist.map((v) => String(v).trim()).filter(Boolean);
+    if (list.length > 200) throw err.validation('白名单最多 200 条');
+    for (const entry of list) {
+      if (!isValidAllowEntry(entry)) {
+        throw err.validation(`白名单条目不合法: ${entry}（需为 IPv4/IPv6 地址或 CIDR，如 1.2.3.4、10.0.0.0/8、2001:db8::/32）`);
+      }
+    }
+    s.rate_limit_allowlist = list;
+  }
+  if (o.quota_contact !== undefined) {
+    const v = String(o.quota_contact).trim();
+    if (v.length > 500) throw err.validation('quota_contact 过长（≤500）');
+    s.quota_contact = v;
+  }
   return s;
+}
+
+/** 白名单条目校验：IPv4 / IPv6 / 各自的 CIDR */
+export function isValidAllowEntry(entry: string): boolean {
+  const m = /^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/.exec(entry);
+  if (!m) return false;
+  const [, addr, bitsRaw] = m;
+  const isV4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(addr!);
+  const isV6 = !isV4 && addr!.includes(':') && /^[0-9a-fA-F:.]+$/.test(addr!);
+  if (!isV4 && !isV6) return false;
+  if (isV4 && addr!.split('.').some((p) => Number(p) > 255)) return false;
+  if (bitsRaw !== undefined) {
+    const bits = Number(bitsRaw);
+    if (isV4 && bits > 32) return false;
+    if (isV6 && bits > 128) return false;
+  }
+  return true;
 }
 
 export function saveSettings(db: DB, s: Settings, actor: string): void {

@@ -318,7 +318,20 @@ $('#gen').addEventListener('click', async () => {
       body: JSON.stringify({ name: $('#name').value.trim(), capabilities: $('#caps').value.trim() }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body?.error?.message || ('HTTP ' + res.status));
+    if (!res.ok) {
+      const e = body?.error ?? {};
+      if (res.status === 429) {
+        const d = e.details ?? {};
+        const contact = d.raise_quota || body?.quota?.raise_quota || '';
+        const tip = (d.limit_per_minute ? '限额 ' + d.limit_per_minute + ' 次/分钟，' : '') +
+          (d.reset_in_seconds ? '约 ' + d.reset_in_seconds + ' 秒后可重试。' : '');
+        const link = contact
+          ? ' <a href="' + contact + '" target="_blank" rel="noopener">→ 申请提额（在仓库提 issue 并留下联系方式）</a>'
+          : '';
+        throw new Error(tip + '需要更高额度？' + link);
+      }
+      throw new Error(e.message || ('HTTP ' + res.status));
+    }
     $('#prompt').textContent = body.install_prompt;
     $('#out').classList.remove('hidden');
     if (body.mcp) {
@@ -338,7 +351,7 @@ $('#gen').addEventListener('click', async () => {
     $('#copy').onclick = () => copy(body.install_prompt, '提示词已复制，贴给你的 Agent 吧');
     $('#out').scrollIntoView({ behavior: 'smooth', block: 'center' });
   } catch (e) {
-    err.textContent = '生成失败：' + e.message + '（Hub 可能暂时不可达，稍后重试）';
+    err.innerHTML = '生成失败：' + e.message;
     err.classList.remove('hidden');
   } finally {
     btn.disabled = false;
@@ -416,7 +429,14 @@ $('#demorun').addEventListener('click', async () => {
       body: JSON.stringify({ title: $('#demo-title').value.trim(), body: $('#demo-body').value.trim() }),
     });
     const j = await res.json().catch(() => ({}));
-    if (!res.ok || !j.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    if (!res.ok || !j.ok) {
+      if (res.status === 429) {
+        const d = j?.error?.details ?? {};
+        throw new Error('演示限额已满（' + (d.limit_per_minute ?? '?') + ' 次/分钟），约 ' +
+          (d.reset_in_seconds ?? 60) + ' 秒后重试；服务端白名单可完全豁免。');
+      }
+      throw new Error(j?.error?.message || j?.error || ('HTTP ' + res.status));
+    }
     const rows = j.steps.map((s) => {
       const cls = s.ok ? 'ok' : 'bad';
       return '<li class="' + cls + '"><strong>' + esc(s.step) + '</strong>' +
@@ -443,7 +463,7 @@ $('#demorun').addEventListener('click', async () => {
         '<p class="hint" style="margin-top:12px;font-size:12.5px">' + esc(j.note) + '</p>' +
       '</div>';
   } catch (e) {
-    err.textContent = '演示失败：' + e.message;
+    err.innerHTML = '演示失败：' + e.message;
     err.classList.remove('hidden');
     box.innerHTML = '';
   } finally {

@@ -2,10 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import crypto from 'node:crypto';
 import type { RouteCtx } from '../ctx.js';
 import { AppError } from '../errors.js';
-import { rateLimit, clientKey } from '../auth.js';
+import { rateLimit, clientKey, isAllowlisted, normalizeIp } from '../auth.js';
 import { getSettings } from '../settings.js';
 import { newTaskId } from '../ids.js';
 import { reportResult } from '../results.js';
+import { enforcePublicQuota } from '../quota.js';
 
 /**
  * 社区演示沙箱（免登录）——让访客不装任何东西就看到真实机制：
@@ -27,12 +28,14 @@ export default async function demoRoutes(fastify: FastifyInstance, ctx: RouteCtx
 
   fastify.post('/demo/run', async (req, reply) => {
     if (!ctx.config.publicInstall) throw new AppError(403, 'DEMO_DISABLED', '本 Hub 未开放公开演示');
-    rateLimit(`demo:${clientKey(req)}`, Math.max(3, Math.floor(ctx.config.publicInstallQuota / 2)));
+    const settings = getSettings(db);
+    const peer = normalizeIp(clientKey(req));
+    const allowlisted = isAllowlisted(peer, settings.rate_limit_allowlist);
+    enforcePublicQuota(fastify, settings.demo_per_minute, settings.rate_limit_allowlist, peer, 'demo');
 
     const body = (req.body ?? {}) as { title?: string; body?: string };
     const title = (typeof body.title === 'string' ? body.title.trim() : '').slice(0, 120) || '演示任务';
     const contentBody = (typeof body.body === 'string' ? body.body.trim() : '').slice(0, 800) || '这是一封演示信件。';
-    const settings = getSettings(db);
     const steps: Array<{ at: string; step: string; ok: boolean; detail: string; data?: unknown }> = [];
     const t0 = Date.now();
     const at = () => new Date().toISOString();
@@ -122,8 +125,8 @@ export default async function demoRoutes(fastify: FastifyInstance, ctx: RouteCtx
       const logId = 'AL-DEMO-' + crypto.randomBytes(3).toString('hex').toUpperCase();
       db.prepare(
         `INSERT INTO audit_logs (log_id, task_id, from_agent, to_agent, enqueued_at, dequeued_at, outcome,
-                                 attempt_count, attempts_json, content_digest, note)
-         VALUES (?, ?, ?, ?, ?, ?, 'delivered_confirmed', 1, ?, ?, ?)`,
+                                 attempt_count, attempts_json, content_digest, note, is_demo)
+         VALUES (?, ?, ?, ?, ?, ?, 'delivered_confirmed', 1, ?, ?, ?, 1)`,
       ).run(
         logId, taskId, senderId, receiverId, now, at(),
         JSON.stringify(attemptsSnapshot), digest,
@@ -131,7 +134,7 @@ export default async function demoRoutes(fastify: FastifyInstance, ctx: RouteCtx
       );
       steps.push({
         at: at(), step: '出队 + 留痕', ok: true,
-        detail: `任务从队列删除，留痕 ${logId} 只增不改；内容仅存 SHA-256 摘要 ${digest.slice(0, 16)}…`,
+        detail: `任务从队列删除，留痕 ${logId} 只增不改（标记为演示记录，管理台默认过滤）；内容仅存 SHA-256 摘要 ${digest.slice(0, 16)}…`,
         data: { log_id: logId, content_digest: digest, attempt_count: 1, retry_ladder_min: settings.retry_ladder_s.map((s) => s / 60) },
       });
 

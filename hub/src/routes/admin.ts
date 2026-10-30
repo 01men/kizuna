@@ -20,6 +20,7 @@ interface AuditRow {
   attempts_json: string;
   content_digest: string | null;
   note: string | null;
+  is_demo: number;
 }
 
 function auditView(r: AuditRow) {
@@ -35,7 +36,18 @@ function auditView(r: AuditRow) {
     attempts: JSON.parse(r.attempts_json) as unknown[],
     content_digest: r.content_digest,
     note: r.note,
+    is_demo: r.is_demo === 1,
   };
+}
+
+/**
+ * 演示记录过滤口径（默认排除，保持审计视图纯净）：
+ *   include_demo=1 → 只包含；include_demo=all → 包含全部；其余（缺省/false）→ 排除
+ */
+export function demoSqlFilter(includeDemo: string | undefined): { clause: string } {
+  if (includeDemo === '1' || includeDemo === 'true' || includeDemo === 'only') return { clause: 'is_demo = 1' };
+  if (includeDemo === 'all') return { clause: '' };
+  return { clause: 'is_demo = 0' };
 }
 
 function todayStartIso(): string {
@@ -63,20 +75,22 @@ export default async function adminRoutes(fastify: FastifyInstance, ctx: RouteCt
     const retrying = (db.prepare(`SELECT COUNT(*) AS c FROM tasks WHERE status = 'wait_retry'`).get() as { c: number }).c;
     const delivering = (db.prepare(`SELECT COUNT(*) AS c FROM tasks WHERE status = 'delivering'`).get() as { c: number }).c;
     const todayDelivered = (db
-      .prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE outcome = 'delivered_confirmed' AND dequeued_at >= ?`)
+      .prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE outcome = 'delivered_confirmed' AND is_demo = 0 AND dequeued_at >= ?`)
       .get(dayStart) as { c: number }).c;
     const todayFailed = (db
-      .prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE outcome IN ('delivery_failed','invalid_target') AND dequeued_at >= ?`)
+      .prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE outcome IN ('delivery_failed','invalid_target') AND is_demo = 0 AND dequeued_at >= ?`)
       .get(dayStart) as { c: number }).c;
+    const demoTotal = (db.prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE is_demo = 1`).get() as { c: number }).c;
 
     const recent = db
-      .prepare(`SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10`)
+      .prepare(`SELECT * FROM audit_logs WHERE is_demo = 0 ORDER BY id DESC LIMIT 10`)
       .all() as AuditRow[];
 
     return {
       agents: { total: agentTotal, online: agentOnline, offline: agentTotal - agentOnline - agentNeverSeen, unknown: agentNeverSeen },
       queue: { depth: queueDepth, retrying, delivering },
       today: { delivered: todayDelivered, failed: todayFailed },
+      audit: { demo_records: demoTotal, note: '演示记录默认不计入业务指标与留痕列表' },
       recent_audit: recent.map(auditView),
       generated_at: new Date().toISOString(),
     };
@@ -85,12 +99,14 @@ export default async function adminRoutes(fastify: FastifyInstance, ctx: RouteCt
   // ---------- 留痕查询（只读，无删除通道） ----------
   fastify.get('/api/v1/audit', async (req) => {
     requireAdmin(req);
-    const q = req.query as { outcome?: string; from?: string; to?: string; limit?: string; offset?: string };
+    const q = req.query as { outcome?: string; from?: string; to?: string; include_demo?: string; limit?: string; offset?: string };
     const limit = Math.min(Math.max(Number(q.limit ?? 50) || 50, 1), 1000);
     const offset = Math.max(Number(q.offset ?? 0) || 0, 0);
 
     const where: string[] = [];
     const params: unknown[] = [];
+    const demoClause = demoSqlFilter(q.include_demo).clause;
+    if (demoClause) where.push(demoClause);
     if (q.outcome) {
       if (!OUTCOMES.includes(q.outcome)) throw err.validation(`outcome 仅支持: ${OUTCOMES.join('/')}`);
       where.push('outcome = ?');
@@ -106,20 +122,23 @@ export default async function adminRoutes(fastify: FastifyInstance, ctx: RouteCt
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const total = (db.prepare(`SELECT COUNT(*) AS c FROM audit_logs ${whereSql}`).get(...params) as { c: number }).c;
+    const demoCount = (db.prepare(`SELECT COUNT(*) AS c FROM audit_logs WHERE is_demo = 1`).get() as { c: number }).c;
     const rows = db
       .prepare(`SELECT * FROM audit_logs ${whereSql} ORDER BY id DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as AuditRow[];
-    return { items: rows.map(auditView), total, limit, offset };
+    return { items: rows.map(auditView), total, demo_total: demoCount, limit, offset, include_demo: q.include_demo ?? 'false' };
   });
 
   // ---------- 留痕导出（JSONL / CSV） ----------
   fastify.get('/api/v1/audit/export', async (req, reply) => {
     requireAdmin(req);
-    const q = req.query as { outcome?: string; from?: string; to?: string; format?: string };
+    const q = req.query as { outcome?: string; from?: string; to?: string; format?: string; include_demo?: string };
     const format = q.format === 'csv' ? 'csv' : 'jsonl';
 
     const where: string[] = [];
     const params: unknown[] = [];
+    const demoClause = demoSqlFilter(q.include_demo).clause;
+    if (demoClause) where.push(demoClause);
     if (q.outcome && OUTCOMES.includes(q.outcome)) {
       where.push('outcome = ?');
       params.push(q.outcome);

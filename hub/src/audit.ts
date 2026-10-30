@@ -35,6 +35,8 @@ export interface FinalizeInput {
   attempts: AttemptSnapshot[];
   /** 附加说明（目标无效原因等） */
   reason?: string;
+  /** 演示沙箱产生的记录（管理台默认过滤，保持审计视图纯净） */
+  isDemo?: boolean;
 }
 
 /**
@@ -52,8 +54,8 @@ export function writeAudit(db: DB, input: FinalizeInput): string {
   db.prepare(
     `INSERT INTO audit_logs
        (log_id, task_id, from_agent, to_agent, enqueued_at, dequeued_at, outcome,
-        attempt_count, attempts_json, content_digest, note)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        attempt_count, attempts_json, content_digest, note, is_demo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     logId,
     task.task_id,
@@ -66,6 +68,7 @@ export function writeAudit(db: DB, input: FinalizeInput): string {
     JSON.stringify(attempts),
     digest,
     noteParts.length ? noteParts.join(' | ') : null,
+    input.isDemo ? 1 : 0,
   );
   return logId;
 }

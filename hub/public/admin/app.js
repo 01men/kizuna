@@ -293,6 +293,7 @@ async function renderOverview(main) {
       <div class="card warn"><div class="k">重试中任务</div><div class="v">${o.queue.retrying}</div><div class="k muted">梯度见「设置」</div></div>
       <div class="card ok"><div class="k">今日已签收</div><div class="v">${o.today.delivered}</div><div class="k muted">UTC 日界</div></div>
       <div class="card bad"><div class="k">今日投递失败</div><div class="v">${o.today.failed}</div><div class="k muted">含目标无效</div></div>
+      <div class="card"><div class="k">演示记录</div><div class="v">${o.audit?.demo_records ?? 0}</div><div class="k muted">默认不计入业务指标</div></div>
     </div>
     <div class="panel">
       <div class="panel-head">最近留痕 <span class="spacer"></span><a href="#/audit" class="muted" style="font-size:12.5px">查看全部 →</a></div>
@@ -602,7 +603,7 @@ async function showTaskDetail(taskId) {
 // 页面四：投递留痕
 // ---------------------------------------------------------------------------
 
-const auditFilter = { outcome: '', from: '', to: '' };
+const auditFilter = { outcome: '', from: '', to: '', include_demo: 'false' };
 
 async function renderAudit(main) {
   main.innerHTML = `
@@ -619,6 +620,11 @@ async function renderAudit(main) {
         <input type="date" id="au-from" value="${esc(auditFilter.from)}" title="起始日期（UTC）">
         <span class="muted">→</span>
         <input type="date" id="au-to" value="${esc(auditFilter.to)}" title="结束日期（UTC）">
+        <select id="au-demo" title="演示沙箱记录（默认不显示，保持审计视图纯净）">
+          <option value="false" ${auditFilter.include_demo === 'false' ? 'selected' : ''}>不含演示记录</option>
+          <option value="1" ${auditFilter.include_demo === '1' ? 'selected' : ''}>只看演示记录</option>
+          <option value="all" ${auditFilter.include_demo === 'all' ? 'selected' : ''}>全部（含演示）</option>
+        </select>
       </div>
       <span class="spacer"></span><span class="muted" id="au-total"></span>
     </div>
@@ -631,6 +637,7 @@ async function renderAudit(main) {
     if (auditFilter.outcome) p.set('outcome', auditFilter.outcome);
     if (auditFilter.from) p.set('from', auditFilter.from + 'T00:00:00Z');
     if (auditFilter.to) p.set('to', auditFilter.to + 'T23:59:59Z');
+    p.set('include_demo', auditFilter.include_demo);
     Object.assign(p, extra);
     return p;
   };
@@ -640,7 +647,8 @@ async function renderAudit(main) {
     let data;
     try { data = await api(`/api/v1/audit?${paramsOf({ limit: 100 })}`); }
     catch (err) { if (err.status === 401) return; box.innerHTML = ''; box.appendChild(errorState(err, load)); return; }
-    $('#au-total').textContent = `共 ${data.total} 条`;
+    $('#au-total').textContent = `共 ${data.total} 条` +
+      (data.demo_total ? `（另有 ${data.demo_total} 条演示记录已隐藏）` : '');
     if (!data.items.length) {
       box.innerHTML = emptyState('暂无留痕', '每一封信的最终去向都会写入这里（只增不改不删）');
       return;
@@ -655,7 +663,7 @@ async function renderAudit(main) {
           <td class="mono">${esc(a.task_id)}</td>
           <td class="mono">${esc(a.from)}</td>
           <td class="mono">${esc(a.to)}</td>
-          <td>${outcomeBadge(a.outcome)}</td>
+          <td>${outcomeBadge(a.outcome)}${a.is_demo ? ' <span class="badge info">演示</span>' : ''}</td>
           <td>${a.attempt_count}</td>
         </tr>`).join('')}
       </tbody></table>`;
@@ -665,6 +673,7 @@ async function renderAudit(main) {
   $('#au-outcome').onchange = () => { auditFilter.outcome = $('#au-outcome').value; load(); };
   $('#au-from').onchange = () => { auditFilter.from = $('#au-from').value; load(); };
   $('#au-to').onchange = () => { auditFilter.to = $('#au-to').value; load(); };
+  $('#au-demo').onchange = () => { auditFilter.include_demo = $('#au-demo').value; load(); };
   $('#au-jsonl').onclick = () => downloadAudit('jsonl', paramsOf);
   $('#au-csv').onclick = () => downloadAudit('csv', paramsOf);
   await load();
@@ -818,6 +827,13 @@ async function renderSettings(main) {
         <div class="field"><label>内容最小化</label>
           <select id="st-min"><option value="true" ${settings.content_minimized ? 'selected' : ''}>开启（留痕只存内容摘要）</option>
           <option value="false" ${!settings.content_minimized ? 'selected' : ''}>关闭（留痕附任务标题）</option></select></div>
+        <div class="field"><label>公开安装 · 每人每分钟</label><input id="st-install-rate" type="number" min="1" max="600" value="${settings.public_install_per_minute}"></div>
+        <div class="field"><label>演示沙箱 · 每人每分钟</label><input id="st-demo-rate" type="number" min="1" max="600" value="${settings.demo_per_minute}"></div>
+        <div class="field full"><label>限流白名单（IP 或 CIDR，逗号/换行分隔；命中的来源不受限额约束——用于社区机器人、官方巡检、自有固定出口）</label>
+          <textarea id="st-allow" rows="3" class="mono" placeholder="1.2.3.4, 10.0.0.0/8, 2001:db8::/32">${esc((settings.rate_limit_allowlist ?? []).join(', '))}</textarea>
+          <span class="muted" style="font-size:12px">⚠️ 白名单完全豁免限流，只填你信任的地址；留空表示不豁免任何来源</span></div>
+        <div class="field full"><label>提额联系方式（超限时展示给访客）</label>
+          <input id="st-contact" value="${esc(settings.quota_contact)}" placeholder="https://github.com/01men/kizuna/issues/new 或 mailto:you@example.com"></div>
       </div>
       <p class="error" id="st-err" hidden></p>
       <div class="form-actions"><button class="btn primary" id="st-save">保存</button></div>
@@ -847,6 +863,10 @@ async function renderSettings(main) {
         audit_retention_days: Number($('#st-retain').value),
         content_minimized: $('#st-min').value === 'true',
       };
+      body.public_install_per_minute = Number($('#st-install-rate').value);
+      body.demo_per_minute = Number($('#st-demo-rate').value);
+      body.rate_limit_allowlist = $('#st-allow').value.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
+      body.quota_contact = $('#st-contact').value.trim();
       await api('/api/v1/settings', { method: 'PUT', body });
       toast('已保存，立即生效');
     } catch (err) { errEl.textContent = err.message; errEl.hidden = false; }

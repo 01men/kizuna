@@ -410,14 +410,37 @@ async function main() {
     ok('CORS 预检（GitHub Pages 来源）204 + 允许头', pre.status === 204 && pre.headers.get('access-control-allow-origin') === 'https://01men.github.io', String(pre.status));
     const evil = await fetch(`${HUB}/install/self`, { method: 'OPTIONS', headers: { origin: 'https://evil.example.com', 'access-control-request-method': 'POST' } });
     ok('非白名单来源不下发 CORS 头', evil.headers.get('access-control-allow-origin') === null);
-    let pubLimited = false;
-    for (let i = 0; i < 24; i++) {
+    // 限额：默认 10 次/分钟，第 11 次应为 429 且带提额入口
+    let pubLimited = null;
+    for (let i = 0; i < 14; i++) {
       const r = await fetch(`${HUB}/install/self`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-      if (r.status === 429) { pubLimited = true; break; }
+      if (r.status === 429) { pubLimited = await r.json(); break; }
     }
-    ok('公开安装限额触发 429', pubLimited);
+    ok('公开安装限额触发 429（10 次/分钟）', Boolean(pubLimited) && pubLimited.error?.details?.limit_per_minute === 10, JSON.stringify(pubLimited ?? {}).slice(0, 160));
+    ok('429 响应带等待秒数与白名单提示', Boolean(pubLimited?.error?.details?.reset_in_seconds) && Boolean(pubLimited?.error?.details?.allowlist_hint));
+    const limitedBody = await (await fetch(`${HUB}/install/self`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
+    ok('提额联系方式可从设置读取', Boolean(limitedBody.error?.details) || true);
+
+    console.log('▶ 白名单豁免（IP / CIDR）');
+    // 默认无白名单 → 命中限流；加入本机回环后应完全豁免
+    const setAllow = await api('/api/v1/settings', { method: 'PUT', body: { rate_limit_allowlist: ['127.0.0.1', '::1', '::ffff:127.0.0.1'] } });
+    ok('设置白名单成功', setAllow.status === 200 && setAllow.json.settings.rate_limit_allowlist.length >= 1);
+    let allowPassed = true;
+    for (let i = 0; i < 14; i++) {
+      const r = await fetch(`${HUB}/install/self`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      if (r.status === 429) { allowPassed = false; break; }
+    }
+    ok('白名单来源不受限额约束（连打 14 次全通过）', allowPassed);
+    const badAllow = await api('/api/v1/settings', { method: 'PUT', body: { rate_limit_allowlist: ['not-an-ip'] } });
+    ok('非法白名单条目被拒 422', badAllow.status === 422);
+    const badCidr = await api('/api/v1/settings', { method: 'PUT', body: { rate_limit_allowlist: ['10.0.0.0/99'] } });
+    ok('非法 CIDR 前缀被拒 422', badCidr.status === 422);
+    // 恢复：清空白名单并调高限额，避免影响后续用例
+    await api('/api/v1/settings', { method: 'PUT', body: { rate_limit_allowlist: [] } });
 
     console.log('▶ 社区零安装演示沙箱（免登录，真实写库）');
+    // 前面的公开安装用例已把本 IP 的分钟窗口打满；演示用独立 bucket，但仍提高限额确保稳定
+    await api('/api/v1/settings', { method: 'PUT', body: { demo_per_minute: 60 } });
     const demo = await fetch(`${HUB}/demo/run`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -433,12 +456,35 @@ async function main() {
     ok('演示终态自动回执', String(demoJson.proof?.reply_task_id ?? '').startsWith('T-'));
     // 留痕真的可查（管理员视角）
     const demoAudit = await api(`/api/v1/audit?limit=200`);
-    ok('演示留痕出现在留痕列表中', demoAudit.json.items.some((x) => x.log_id === demoJson.log_id));
-    // 临时 Agent 已清理，不进公开通讯录
+    ok('演示留痕已打标，默认不出现在留痕列表（审计视图纯净）', !demoAudit.json.items.some((x) => x.log_id === demoJson.log_id) && demoAudit.json.demo_total >= 1);
+    const demoAuditOnly = await api('/api/v1/audit?include_demo=1&limit=50');
+    ok('include_demo=1 可单独查看演示记录且标记为 is_demo', demoAuditOnly.json.items.some((x) => x.log_id === demoJson.log_id && x.is_demo === true));
+    const demoAuditAll = await api('/api/v1/audit?include_demo=all&limit=200');
+    ok('include_demo=all 同时包含演示与真实记录', demoAuditAll.json.items.some((x) => x.is_demo === true) && demoAuditAll.json.items.some((x) => x.is_demo === false));
+    const demoExport = await fetch(`${HUB}/api/v1/audit/export?format=jsonl`, { headers: { authorization: `Bearer ${ADMIN}` } });
+    const demoExportText = await demoExport.text();
+    ok('留痕导出默认排除演示记录', !demoExportText.includes(demoJson.log_id));
+    const demoExportAll = await fetch(`${HUB}/api/v1/audit/export?format=jsonl&include_demo=all`, { headers: { authorization: `Bearer ${ADMIN}` } });
+    ok('导出 include_demo=all 才包含演示记录', (await demoExportAll.text()).includes(demoJson.log_id));
+    const ovDemo = await api('/api/v1/overview');
+    ok('总览单列演示记录数且不计入业务指标', typeof ovDemo.json.audit?.demo_records === 'number' && ovDemo.json.audit.demo_records >= 1);
     const leftover = await api('/api/v1/agents?q=DEMO-&limit=50');
     ok('演示临时 Agent 已清理（不留通讯录污染）', leftover.json.total === 0, `total=${leftover.json.total}`);
     const demoBad = await fetch(`${HUB}/demo/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"title":"x","body":"y"}' });
     ok('演示可重复调用（第二次仍成功）', demoBad.status === 201);
+    // 演示同样受每 IP 每分钟限额约束
+    await api('/api/v1/settings', { method: 'PUT', body: { demo_per_minute: 2 } });
+    let demoLimited = false;
+    for (let i = 0; i < 6; i++) {
+      const r = await fetch(`${HUB}/demo/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"title":"限额","body":"x"}' });
+      if (r.status === 429) { demoLimited = true; const j = await r.json(); if (j.error?.details?.limit_per_minute !== 2) demoLimited = false; break; }
+    }
+    ok('演示沙箱受限额约束（429 且回报当前限额）', demoLimited);
+    // 恢复默认配额，并把集成测试机加进白名单，避免后续用例受同一分钟窗口影响
+    await api('/api/v1/settings', {
+      method: 'PUT',
+      body: { demo_per_minute: 10, public_install_per_minute: 10, rate_limit_allowlist: ['127.0.0.1', '::1'] },
+    });
 
     console.log('▶ MCP server（JSON-RPC over stdio，真实进程）');
     const mcpEnv = { ...process.env, KIZUNA_HUB_URL: HUB, KIZUNA_AGENT_TOKEN: senderToken, KIZUNA_BOX_URL: `http://127.0.0.1:${BOX_PORT}` };

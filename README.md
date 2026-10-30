@@ -109,7 +109,8 @@ kizuna/
 ├── mcp/kizuna-mcp  # MCP server（零依赖，JSON-RPC over stdio，11 个工具）
 ├── site/           # 社区落地页（GitHub Pages，免登录拿安装提示词）
 ├── install/        # linux.sh / macos.sh / windows.ps1 / termux.sh（Hub 按平台下发）
-├── test/e2e.mjs    # 端到端测试（90 项）
+├── test/e2e.mjs    # 端到端测试
+├── QUOTA.md        # 提额 / 白名单申请流程
 └── Dockerfile · docker-compose.yml · Caddyfile
 ```
 
@@ -122,7 +123,11 @@ POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
 → 201 {"token":"et_…", "expires_at","install_prompt","mcp":{…}}
 ```
 
-安全约束：每个 IP 每小时限额（`KIZUNA_PUBLIC_INSTALL_QUOTA`，默认 20）；令牌仍是一次性、10 分钟；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
+安全约束：每人每分钟限额 **10 次**（公开安装与演示各自计算，管理台可调）；令牌仍是一次性、10 分钟；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
+
+- **超限怎么办**：落地页会显示等待秒数与提额入口 → 见 [QUOTA.md](QUOTA.md)（在仓库提 issue 留下用途/出口 IP/联系方式）
+- **服务端白名单**：管理台「设置」页维护 IP/CIDR，命中后**完全豁免限流**（供社区机器人、官方巡检、自有固定出口）
+- **演示记录打标**：演示沙箱写入的留痕 `is_demo=1`，管理台留痕页与业务指标**默认过滤**，审计视图保持纯净；确认记录仍在库中（只增不删），可切换「只看演示记录 / 全部」查看
 
 ### MCP
 

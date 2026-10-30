@@ -2,10 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import type { RouteCtx } from '../ctx.js';
 import { AppError, err } from '../errors.js';
-import { requireAdmin, rateLimit, clientKey } from '../auth.js';
+import { requireAdmin, rateLimit, clientKey, isAllowlisted } from '../auth.js';
+import { getSettings, type Settings } from '../settings.js';
 import { newEnrollToken } from '../ids.js';
 import { createAgent } from '../agentService.js';
 import { renderPrompt, renderScript } from '../prompt.js';
+import { enforcePublicQuota } from '../quota.js';
 
 interface EnrollRow {
   token: string;
@@ -76,7 +78,9 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
   //      全局总开关 KIZUNA_PUBLIC_INSTALL=false 可随时关闭。
   fastify.post('/install/self', async (req, reply) => {
     if (!config.publicInstall) throw new AppError(403, 'PUBLIC_INSTALL_DISABLED', '本 Hub 未开放公开安装');
-    rateLimit(`public_install:${clientKey(req)}`, config.publicInstallQuota);
+    const settings = getSettings(db);
+    const peer = clientKey(req);
+    enforcePublicQuota(fastify, settings.public_install_per_minute, settings.rate_limit_allowlist, peer, 'public_install');
     const body = (req.body ?? {}) as { name?: string; capabilities?: string };
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
     const capabilities = typeof body.capabilities === 'string' ? body.capabilities.trim().slice(0, 300) : '';
@@ -96,6 +100,11 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
       ttl_seconds: ENROLL_TTL_MS / 1000,
       hub_url: config.publicUrl,
       install_prompt: renderPrompt(config.publicUrl, token),
+      quota: {
+        limit_per_minute: settings.public_install_per_minute,
+        allowlisted: isAllowlisted(peer, settings.rate_limit_allowlist),
+        raise_quota: settings.quota_contact || null,
+      },
       mcp: {
         name: 'kizuna',
         command: 'npx',

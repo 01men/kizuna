@@ -155,7 +155,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   attempt_count  INTEGER NOT NULL,
   attempts_json  TEXT NOT NULL,
   content_digest TEXT,
-  note           TEXT
+  note           TEXT,
+  is_demo        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_audit_outcome ON audit_logs(outcome, dequeued_at);
 
@@ -201,6 +202,15 @@ function migrate(db: DB): void {
   if (!agentCols.includes('agent_card')) db.exec('ALTER TABLE agents ADD COLUMN agent_card TEXT');
   const taskCols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
   if (!taskCols.includes('reply_to')) db.exec('ALTER TABLE tasks ADD COLUMN reply_to TEXT');
+
+  // v0.3：演示记录打标（is_demo），供管理台默认过滤，保持审计视图纯净
+  const auditCols = (db.prepare('PRAGMA table_info(audit_logs)').all() as { name: string }[]).map((c) => c.name);
+  if (!auditCols.includes('is_demo')) {
+    db.exec('ALTER TABLE audit_logs ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0');
+    // 存量回填：旧版演示沙箱写入的留痕以 AL-DEMO- 开头
+    db.exec("UPDATE audit_logs SET is_demo = 1 WHERE log_id LIKE 'AL-DEMO-%'");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_audit_demo ON audit_logs(is_demo, id)');
 }
 
 export function openDb(config: HubConfig): DB {
