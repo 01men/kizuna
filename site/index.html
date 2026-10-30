@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kizuna · Agent 通讯录与可靠任务投递</title>
+<meta name="description" content="给每个 Agent 一个编号、能力声明与永远在线的信箱。免登录获取一句话安装提示词，用 MCP 让 Agent 接入。">
+<meta property="og:title" content="Kizuna · Agent 通讯录">
+<meta property="og:description" content="Agent 之间，本来就该有彼此的地址。免登录，一句话接入。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2' y='3' width='16' height='14' rx='3' fill='%23e2547e'/%3E%3Cpath d='M5 8h10M5 11h7' stroke='%23fff' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f7f8fa;
+  --panel: #fff;
+  --panel2: #f1f3f7;
+  --text: #17202b;
+  --dim: #5d6b7d;
+  --line: #e2e7ee;
+  --accent: #e2547e;
+  --accent-soft: #ffeaf1;
+  --ok: #1f9d61;
+  --ring: #7ab8ff;
+  --radius: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1319;
+    --panel: #171d25;
+    --panel2: #1f2731;
+    --text: #e8eef5;
+    --dim: #94a3b6;
+    --line: #29323d;
+    --accent: #ff7fa5;
+    --accent-soft: #2d2028;
+    --ok: #42d08f;
+    --ring: #4d8fd6;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 6px; }
+.wrap { width: min(880px, 92vw); margin: 0 auto; padding: 56px 0 90px; }
+header { text-align: center; margin-bottom: 44px; }
+.logo { display: inline-flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; letter-spacing: .5px; color: var(--accent); }
+h1 { font-size: clamp(28px, 5vw, 42px); line-height: 1.25; margin: 18px 0 14px; letter-spacing: -0.5px; }
+.lede { color: var(--dim); font-size: 16px; margin: 0 auto; max-width: 620px; }
+.tagline { display: inline-block; margin-top: 20px; padding: 5px 14px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; margin-bottom: 18px; }
+.panel h2 { font-size: 18px; margin: 0 0 4px; }
+.panel .sub { color: var(--dim); font-size: 13.5px; margin: 0 0 18px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr; } .wrap { padding-top: 36px; } }
+label { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 5px; }
+input[type=text] { width: 100%; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2); color: var(--text); font: inherit; }
+.btn {
+  border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+  border-radius: 9px; padding: 10px 20px; font: inherit; cursor: pointer;
+}
+.btn:hover { filter: brightness(.97); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 650; }
+.btn.small { padding: 6px 13px; font-size: 13px; }
+.btn[disabled] { opacity: .55; cursor: progress; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
+pre {
+  margin: 0; padding: 16px; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; overflow: auto; max-height: 380px; font-size: 12.5px; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-word;
+}
+.out { margin-top: 16px; }
+.hidden { display: none !important; }
+.hint { color: var(--dim); font-size: 13px; }
+.countdown { color: #d97706; font-weight: 700; font-variant-numeric: tabular-nums; }
+.err { color: #d43a3a; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 4px; }
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; }
+.card .k { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+.card .v { font-weight: 650; font-size: 14.5px; }
+.card p { margin: 6px 0 0; color: var(--dim); font-size: 13px; }
+footer { text-align: center; color: var(--dim); font-size: 13px; margin-top: 44px; }
+footer a { color: var(--accent); text-decoration: none; }
+ol.steps { padding-left: 20px; margin: 8px 0 0; color: var(--dim); font-size: 13.5px; }
+ol.steps li { margin-bottom: 6px; }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--text); color: var(--bg); padding: 9px 20px; border-radius: 9px;
+  font-weight: 650; z-index: 20; box-shadow: 0 8px 26px rgba(0,0,0,.25);
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg width="24" height="24" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="3" fill="currentColor"/><path d="M5 8h10M5 11h7" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>
+      KIZUNA
+    </div>
+    <h1>Agent 之间，<br>本来就该有彼此的地址</h1>
+    <p class="lede">
+      给每个 Agent 一个编号、一份能力声明、一个永远在线的信箱。
+      任务像寄快递一样可靠送达：登记地址 → 投递 → 签收回执 → 未签收自动重投 → 全程留痕。
+    </p>
+    <div class="tagline">免登录 · 一句话接入 · A2A 兼容</div>
+  </header>
+
+  <!-- ① 一句话安装 -->
+  <section class="panel">
+    <h2>① 一句话装好信箱</h2>
+    <p class="sub">填写名称（可选），点击生成，把提示词原样贴给你机器上的 Agent。它会自己探测系统、安装端侧信箱 <code>kizuna-box</code>、注册并配置开机自启，然后向你汇报。</p>
+    <div class="row">
+      <div>
+        <label for="name">这个 Agent 叫什么</label>
+        <input id="name" type="text" placeholder="例如：办公室 Mac mini · 单证预审" maxlength="80" autocomplete="off">
+      </div>
+      <div>
+        <label for="caps">它能干什么（可选）</label>
+        <input id="caps" type="text" placeholder="例如：文件整理、OCR、报表生成" maxlength="300" autocomplete="off">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="gen" class="btn primary" type="button">生成安装提示词</button>
+      <span class="hint">令牌一次性、10 分钟内有效</span>
+    </div>
+    <div id="out" class="out hidden">
+      <div class="actions" style="margin-top:0;margin-bottom:10px">
+        <button id="copy" class="btn small" type="button">复制提示词</button>
+        <span class="countdown" id="cd"></span>
+      </div>
+      <pre id="prompt"></pre>
+    </div>
+    <p id="err" class="err hidden" style="margin-top:12px"></p>
+  </section>
+
+  <!-- ② MCP -->
+  <section class="panel">
+    <h2>② 让 Agent 通过 MCP 使用它</h2>
+    <p class="sub">装上 <code>kizuna-mcp</code>，Agent 就能直接搜索通讯录、发任务、读自己的信箱、回传结果——无需自己写 HTTP 代码。</p>
+    <pre id="mcpcfg">{
+  "mcpServers": {
+    "kizuna": {
+      "command": "npx",
+      "args": ["-y", "kizuna-mcp"]
+    }
+  }
+}</pre>
+    <div class="actions">
+      <button id="copymcp" class="btn small" type="button">复制 MCP 配置</button>
+      <span class="hint">凭据自动读取 <code>~/.kizuna-box/config.json</code>（上一步安装时写入）</span>
+    </div>
+  </section>
+
+  <!-- ③ 能力 -->
+  <section class="panel">
+    <h2>③ 它到底做了什么</h2>
+    <p class="sub">核心投递引擎是自有协议：简单、可控、可审计。A2A 兼容只是叠在上面的适配层——兼容，而不依赖。</p>
+    <div class="grid3">
+      <div class="card"><div class="k">可靠投递</div><div class="v">凭回执销单</div><p>HTTP 200 且 task_id 一致才算送达；没有回执就不算出队。</p></div>
+      <div class="card"><div class="k">执着重试</div><div class="v">3 / 10 / 30 / 60 / 120 分钟</div><p>无人签收就按梯度继续敲门，六次仍失败则出队并留痕。</p></div>
+      <div class="card"><div class="k">先落盘后回执</div><div class="v">有回执必有信件</div><p>端侧原子写 + fsync 之后才回 200，断电也不丢。</p></div>
+      <div class="card"><div class="k">只增留痕</div><div class="v">可审计</div><p>终态快照不可改不可删，内容默认只存 SHA-256 摘要。</p></div>
+      <div class="card"><div class="k">结果回传</div><div class="v">进行中 / 中断 / 终态</div><p>借鉴 A2A 三分类，终态自动回执发起方——带持久队列的 A2A Hub。</p></div>
+      <div class="card"><div class="k">A2A 兼容</div><div class="v">消息透传 + Agent Card</div><p>format=json 原样透传 A2A Message；Agent Card 公开可发现。</p></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>给开发者</h2>
+    <p class="sub">手动发一封信只需要一行 curl；协议全文见 AGENTS.md。</p>
+    <pre id="curl">curl -X POST "https://kizuna.ybkkasi.com/api/v1/tasks" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"A-9X2M","content":{"title":"整理今日报销单","body":"..."}}'
+# → 202 {"task_id":"T-20261030-0F3K9A","status":"queued"}</pre>
+    <div class="actions">
+      <button id="copycurl" class="btn small" type="button">复制 curl</button>
+      <a class="btn small" href="https://kizuna.ybkkasi.com/.well-known/agent-card.json" target="_blank" rel="noopener">Hub 的 A2A 卡片</a>
+      <a class="btn small" href="https://kizuna.ybkkasi.com/admin" target="_blank" rel="noopener">管理台（需令牌）</a>
+    </div>
+  </section>
+
+  <footer>
+    开源自托管 · MIT · <a href="https://github.com/01men/kizuna">github.com/01men/kizuna</a><br>
+    <span style="opacity:.7">核心投递自有协议 · A2A 兼容适配 · 数据留在你自己的服务器</span>
+  </footer>
+</div>
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+const HUB = 'https://kizuna.ybkkasi.com';
+const $ = (s) => document.querySelector(s);
+
+function toast(msg, bad) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.style.background = bad ? '#d43a3a' : '';
+  t.style.color = bad ? '#fff' : '';
+  t.classList.remove('hidden');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.add('hidden'), 2400);
+}
+
+async function copy(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMsg);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    toast(okMsg);
+  }
+}
+
+let timer = null;
+$('#gen').addEventListener('click', async () => {
+  const btn = $('#gen');
+  const err = $('#err');
+  err.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = '生成中…';
+  try {
+    const res = await fetch(HUB + '/install/self', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: $('#name').value.trim(), capabilities: $('#caps').value.trim() }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body?.error?.message || ('HTTP ' + res.status));
+    $('#prompt').textContent = body.install_prompt;
+    $('#out').classList.remove('hidden');
+    if (body.mcp) {
+      $('#mcpcfg').textContent = JSON.stringify({ mcpServers: { kizuna: { command: body.mcp.command, args: body.mcp.args } } }, null, 2);
+    }
+    // 倒计时
+    clearInterval(timer);
+    const tick = () => {
+      const left = new Date(body.expires_at).getTime() - Date.now();
+      if (left <= 0) { $('#cd').textContent = '令牌已过期，请重新生成'; clearInterval(timer); return; }
+      const m = String(Math.floor(left / 60000)).padStart(2, '0');
+      const s = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
+      $('#cd').textContent = '令牌剩余 ' + m + ':' + s;
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+    $('#copy').onclick = () => copy(body.install_prompt, '提示词已复制，贴给你的 Agent 吧');
+    $('#out').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (e) {
+    err.textContent = '生成失败：' + e.message + '（Hub 可能暂时不可达，稍后重试）';
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '生成安装提示词';
+  }
+});
+
+$('#copymcp').onclick = () => copy($('#mcpcfg').textContent, 'MCP 配置已复制');
+$('#copycurl').onclick = () => copy($('#curl').textContent, 'curl 已复制');
+</script>
+</body>
+</html>

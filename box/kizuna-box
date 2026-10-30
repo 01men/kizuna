@@ -1,0 +1,555 @@
+#!/usr/bin/env node
+/*
+ * Kizuna Box — 端侧信箱服务（Agent-B 的 letterbox）
+ *
+ * 单文件 · 零 npm 依赖（仅 node:http / node:fs / node:crypto / node:path / node:os）
+ * 职责：接收 Hub 投递 → 验签 → 先落盘后回执 → 回环 API 供本机 Agent 读取 → 心跳上报
+ *
+ * 用法：
+ *   kizuna-box run     --config <path>    启动服务
+ *   kizuna-box enroll  --config <path>    用一次性令牌注册（写 config 后即可 run）
+ *                                         环境变量：KIZUNA_ENROLL_TOKEN、KIZUNA_WEBHOOK_URL
+ *   kizuna-box --version / --help
+ *
+ * 规格：docs/03-api.md（投递协议 §3、本地 API §4）、docs/04-box.md
+ * 回执规则：2xx {"status":"received","task_id":...}，10s 内返回；先落盘（原子写+fsync）再回执。
+ */
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const os = require('node:os');
+
+const VERSION = '0.2.0';
+const MAX_BODY = 2 * 1024 * 1024; // 2MB
+const SIGNATURE_MAX_SKEW_S = 300; // 防重放时间窗
+const HEARTBEAT_MIN_S = 60;
+const HEARTBEAT_MAX_S = 300;
+const LOG_ROTATE_BYTES = 10 * 1024 * 1024;
+const LOG_KEEP = 5;
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const args = { command: null, config: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === 'run' || a === 'enroll') args.command = a;
+    else if (a === '--config' || a === '-c') args.config = argv[++i] ?? null;
+    else if (a === '--version' || a === '-v') args.command = 'version';
+    else if (a === '--help' || a === '-h') args.command = 'help';
+  }
+  return args;
+}
+
+function defaultConfigPath() {
+  return path.join(os.homedir(), '.kizuna-box', 'config.json');
+}
+
+function usage() {
+  console.log(`Kizuna Box v${VERSION} — 端侧信箱服务
+
+用法:
+  kizuna-box run --config <config.json>       启动服务（默认配置 ~/.kizuna-box/config.json）
+  kizuna-box enroll --config <config.json>    一次性令牌注册并写入凭据
+                                              环境变量 KIZUNA_ENROLL_TOKEN 必填；
+                                              KIZUNA_WEBHOOK_URL 可选（默认自动探测本机局域网地址）
+  kizuna-box --version | --help
+
+本地 API（仅 127.0.0.1，供本机 Agent 读取信箱）:
+  GET  /healthz                 健康与状态
+  GET  /tasks/pending           未取走的信件
+  GET  /tasks/{task_id}         单封信件
+  POST /tasks/{task_id}/complete 标记已处理（归档，不影响 Hub 留痕）
+  POST /tasks/{task_id}/result  结果回传（转发 Hub；state: working / input-required /
+                                completed / failed / canceled，终态自动回执发起方）
+`);
+}
+
+// ---------------------------------------------------------------------------
+// 日志（10MB × 5 轮转）
+// ---------------------------------------------------------------------------
+
+function createLogger(logDir) {
+  fs.mkdirSync(logDir, { recursive: true });
+  const file = path.join(logDir, 'box.log');
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { /* 新文件 */ }
+
+  function rotateIfNeeded() {
+    if (size < LOG_ROTATE_BYTES) return;
+    for (let i = LOG_KEEP - 1; i >= 1; i--) {
+      const from = `${file}.${i}`;
+      const to = `${file}.${i + 1}`;
+      try { fs.renameSync(from, to); } catch { /* 无旧文件 */ }
+    }
+    try { fs.renameSync(file, `${file}.1`); } catch { /* 无当前文件 */ }
+    size = 0;
+  }
+
+  function write(level, msg, extra) {
+    const line = JSON.stringify({ t: new Date().toISOString(), level, msg, ...extra }) + '\n';
+    rotateIfNeeded();
+    try {
+      fs.appendFileSync(file, line);
+      size += Buffer.byteLength(line);
+    } catch { /* 磁盘故障时静默，服务不因日志中断 */ }
+    if (process.env.KIZUNA_BOX_STDOUT !== '0') {
+      process.stdout.write(line);
+    }
+  }
+
+  return {
+    info: (msg, extra) => write('info', msg, extra),
+    warn: (msg, extra) => write('warn', msg, extra),
+    error: (msg, extra) => write('error', msg, extra),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 配置与目录
+// ---------------------------------------------------------------------------
+
+function loadConfig(cfgPath) {
+  if (!cfgPath || !fs.existsSync(cfgPath)) {
+    console.error(`配置文件不存在: ${cfgPath ?? '(未指定)'}`);
+    process.exit(1);
+  }
+  const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  const root = path.dirname(path.resolve(cfgPath));
+  return {
+    raw: cfg,
+    path: path.resolve(cfgPath),
+    root,
+    hubUrl: String(cfg.hub_url ?? '').replace(/\/+$/, ''),
+    agentId: cfg.agent_id ?? null,
+    agentToken: cfg.agent_token ?? null,
+    endpointSecret: cfg.endpoint_secret ?? null,
+    listenHost: cfg.listen?.host ?? '0.0.0.0',
+    listenPort: Number(cfg.listen?.port ?? 7788),
+    webhookUrl: cfg.webhook_url ?? null,
+    heartbeatIntervalS: Number(cfg.heartbeat_interval_s ?? HEARTBEAT_MIN_S),
+    spoolDir: path.join(root, 'spool'),
+    doneDir: path.join(root, 'spool', 'done'),
+    logDir: path.join(root, 'logs'),
+    stateDir: path.join(root, 'state'),
+  };
+}
+
+function ensureDirs(cfg) {
+  for (const d of [cfg.spoolDir, cfg.doneDir, cfg.logDir, cfg.stateDir]) {
+    fs.mkdirSync(d, { recursive: true });
+  }
+}
+
+function saveConfig(cfgPath, obj) {
+  const tmp = cfgPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, cfgPath);
+  try { fs.chmodSync(cfgPath, 0o600); } catch { /* Windows 忽略 */ }
+}
+
+/** 原子写：tmp + fsync + rename + 目录 fsync —— 先落盘后回执的关键 */
+function atomicWriteJson(file, obj) {
+  const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+  const data = Buffer.from(JSON.stringify(obj, null, 2) + '\n');
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeSync(fd, data);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, file);
+  try {
+    const dirFd = fs.opendirSync(path.dirname(file));
+    dirFd.close();
+    fs.openSync(path.dirname(file), 'r').close(); // 触发目录元数据落盘（尽力而为）
+  } catch { /* 目录 fsync 平台差异，尽力而为 */ }
+}
+
+// ---------------------------------------------------------------------------
+// enroll：一次性令牌换正式凭据
+// ---------------------------------------------------------------------------
+
+/** 探测本机局域网 IPv4（webhook 回填用；多网卡取第一条非内环地址） */
+function detectLanIp() {
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+async function enroll(cfgPath) {
+  const token = process.env.KIZUNA_ENROLL_TOKEN;
+  if (!token) {
+    console.error('缺少 KIZUNA_ENROLL_TOKEN 环境变量');
+    process.exit(1);
+  }
+  const cfg = fs.existsSync(cfgPath)
+    ? JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    : { hub_url: process.env.KIZUNA_HUB_URL ?? '' };
+  const hub = String(cfg.hub_url ?? process.env.KIZUNA_HUB_URL ?? '').replace(/\/+$/, '');
+  if (!hub) {
+    console.error('缺少 hub_url（config.json 或 KIZUNA_HUB_URL）');
+    process.exit(1);
+  }
+  const webhook = process.env.KIZUNA_WEBHOOK_URL ?? `http://${detectLanIp()}:7788`;
+  const res = await fetch(`${hub}/api/v1/enroll`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token, webhook_url: webhook }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status !== 200) {
+    console.error(`注册失败 HTTP ${res.status}:`, JSON.stringify(body));
+    process.exit(1);
+  }
+  cfg.hub_url = hub;
+  cfg.agent_id = body.agent_id;
+  cfg.agent_token = body.agent_token;
+  cfg.endpoint_secret = body.endpoint_secret;
+  cfg.webhook_url = body.webhook_url || webhook;
+  cfg.listen = cfg.listen ?? { host: '0.0.0.0', port: 7788 };
+  cfg.heartbeat_interval_s = cfg.heartbeat_interval_s ?? HEARTBEAT_MIN_S;
+  fs.mkdirSync(path.dirname(path.resolve(cfgPath)), { recursive: true });
+  saveConfig(cfgPath, cfg);
+  // 凭据只写 config.json（600），不回显
+  console.log(`enroll ok: agent_id=${body.agent_id} webhook=${cfg.webhook_url} config=${cfgPath}`);
+  process.exit(0); // 一次性命令：完成即退出（不等待 keep-alive 连接）
+}
+
+// ---------------------------------------------------------------------------
+// 投递验签
+// ---------------------------------------------------------------------------
+
+function safeTaskId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
+}
+
+function verifySignature(secret, timestamp, rawBody, sigHeader) {
+  if (typeof timestamp !== 'string' || typeof sigHeader !== 'string') return false;
+  const ts = Date.parse(timestamp);
+  if (Number.isNaN(ts)) return false;
+  if (Math.abs(Date.now() - ts) > SIGNATURE_MAX_SKEW_S * 1000) return false;
+  const m = /^sha256=([0-9a-f]{64})$/i.exec(sigHeader.trim());
+  if (!m) return false;
+  const expected = crypto.createHmac('sha256', secret).update(timestamp + '.' + rawBody).digest('hex');
+  const a = Buffer.from(expected);
+  const b = Buffer.from(m[1].toLowerCase());
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP 服务
+// ---------------------------------------------------------------------------
+
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > limit) {
+        reject(Object.assign(new Error('payload too large'), { code: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function isLoopback(req) {
+  const addr = req.socket.remoteAddress ?? '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function listPending(cfg) {
+  const out = [];
+  for (const name of fs.readdirSync(cfg.spoolDir)) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      out.push(JSON.parse(fs.readFileSync(path.join(cfg.spoolDir, name), 'utf8')));
+    } catch (e) {
+      // 损坏文件跳过并告警，不阻断其他信件
+    }
+  }
+  out.sort((a, b) => String(a.received_at ?? '').localeCompare(String(b.received_at ?? '')));
+  return out;
+}
+
+function startServer(cfg, log) {
+  const startedAt = Date.now();
+  const server = http.createServer(async (req, res) => {
+    const url = (req.url ?? '/').split('?')[0];
+    try {
+      // ---- 交付路径（强制验签；任何来源） ----
+      if (req.method === 'POST' && url === '/kizuna/deliver') {
+        const raw = await readBody(req, MAX_BODY);
+        const ts = req.headers['x-kizuna-timestamp'];
+        const sig = req.headers['x-kizuna-signature'];
+        const headerTaskId = req.headers['x-kizuna-task-id'];
+        if (!verifySignature(cfg.endpointSecret, String(ts ?? ''), raw, String(sig ?? ''))) {
+          log.warn('delivery rejected: invalid signature', { ip: req.socket.remoteAddress });
+          sendJson(res, 401, { error: { code: 'INVALID_SIGNATURE', message: '签名校验失败' } });
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(raw);
+        } catch {
+          sendJson(res, 400, { error: { code: 'BAD_JSON', message: '请求体不是合法 JSON' } });
+          return;
+        }
+        const taskId = safeTaskId(payload.task_id);
+        if (!taskId || headerTaskId !== taskId) {
+          sendJson(res, 400, { error: { code: 'TASK_ID_MISMATCH', message: 'task_id 缺失或与投递头不一致' } });
+          return;
+        }
+
+        // 幂等去重：同 task_id 直接返回同一回执，不产生第二条信件
+        const letterPath = path.join(cfg.spoolDir, `${taskId}.json`);
+        if (fs.existsSync(letterPath)) {
+          log.info('duplicate delivery (idempotent ack)', { task_id: taskId });
+          sendJson(res, 200, { status: 'received', task_id: taskId, received_at: fs.statSync(letterPath).mtime.toISOString(), duplicate: true });
+          return;
+        }
+
+        // 先落盘（原子写 + fsync），再回 200 —— 「有回执必有信件」
+        const letter = {
+          task_id: taskId,
+          from: payload.from ?? null,
+          content: payload.content ?? null,
+          meta: payload.meta ?? null,
+          received_at: new Date().toISOString(),
+          completed: false,
+        };
+        try {
+          atomicWriteJson(letterPath, letter);
+        } catch (e) {
+          log.error('spool write failed', { task_id: taskId, err: String(e) });
+          sendJson(res, 500, { error: { code: 'SPOOL_WRITE_FAILED', message: '落盘失败，请 Hub 稍后重投' } });
+          return;
+        }
+        log.info('letter received', { task_id: taskId, attempt: payload.meta?.attempt });
+        sendJson(res, 200, { status: 'received', task_id: taskId, received_at: letter.received_at });
+        return;
+      }
+
+      // ---- 本地 API（仅回环，供本机 Agent 使用） ----
+      if (!isLoopback(req)) {
+        sendJson(res, 403, { error: { code: 'FORBIDDEN', message: '本地 API 仅限 127.0.0.1 访问' } });
+        return;
+      }
+
+      if (req.method === 'GET' && url === '/healthz') {
+        const pending = listPending(cfg).filter((l) => !l.completed);
+        sendJson(res, 200, {
+          ok: true,
+          version: VERSION,
+          agent_id: cfg.agentId,
+          hub: cfg.hubUrl,
+          spool: pending.length,
+          uptime_s: Math.floor((Date.now() - startedAt) / 1000),
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && url === '/tasks/pending') {
+        const pending = listPending(cfg).filter((l) => !l.completed);
+        sendJson(res, 200, { items: pending, total: pending.length });
+        return;
+      }
+
+      const letterMatch = /^\/tasks\/([A-Za-z0-9_-]{1,64})$/.exec(url);
+      if (letterMatch && req.method === 'GET') {
+        const p = path.join(cfg.spoolDir, `${letterMatch[1]}.json`);
+        if (!fs.existsSync(p)) {
+          sendJson(res, 404, { error: { code: 'TASK_NOT_FOUND', message: '信箱中没有这封信' } });
+          return;
+        }
+        sendJson(res, 200, JSON.parse(fs.readFileSync(p, 'utf8')));
+        return;
+      }
+
+      const completeMatch = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/complete$/.exec(url);
+      if (completeMatch && req.method === 'POST') {
+        const id = completeMatch[1];
+        const p = path.join(cfg.spoolDir, `${id}.json`);
+        if (!fs.existsSync(p)) {
+          sendJson(res, 404, { error: { code: 'TASK_NOT_FOUND', message: '信箱中没有这封信' } });
+          return;
+        }
+        const letter = JSON.parse(fs.readFileSync(p, 'utf8'));
+        letter.completed = true;
+        letter.completed_at = new Date().toISOString();
+        atomicWriteJson(p, letter);
+        try { fs.renameSync(p, path.join(cfg.doneDir, `${id}.json`)); } catch { /* 归档失败不影响应答 */ }
+        sendJson(res, 200, { ok: true, task_id: id, archived: true });
+        return;
+      }
+
+      // 结果回传：本机 Agent 经回环提交，box 以自身 Agent 令牌转发 Hub（v1.1 三分类）
+      const resultMatch = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/result$/.exec(url);
+      if (resultMatch && req.method === 'POST') {
+        const raw = await readBody(req, MAX_BODY);
+        let payload;
+        try {
+          payload = raw ? JSON.parse(raw) : {};
+        } catch {
+          sendJson(res, 400, { error: { code: 'BAD_JSON', message: '请求体不是合法 JSON' } });
+          return;
+        }
+        let hubRes;
+        try {
+          hubRes = await fetch(`${cfg.hubUrl}/api/v1/tasks/${resultMatch[1]}/result`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.agentToken}` },
+            body: JSON.stringify(payload ?? {}),
+          });
+        } catch (e) {
+          sendJson(res, 502, { error: { code: 'HUB_UNREACHABLE', message: `Hub 不可达: ${String(e).slice(0, 120)}` } });
+          return;
+        }
+        const text = await hubRes.text();
+        let body2;
+        try { body2 = JSON.parse(text); } catch { body2 = { raw: text.slice(0, 500) }; }
+        log.info('result forwarded', { task_id: resultMatch[1], status: hubRes.status, state: payload?.state });
+        res.writeHead(hubRes.status, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(body2));
+        return;
+      }
+
+      if (url === '/' && req.method === 'GET') {
+        sendJson(res, 200, { service: 'kizuna-box', version: VERSION, ok: true });
+        return;
+      }
+
+      sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `路径不存在: ${req.method} ${url}` } });
+    } catch (e) {
+      const code = e && e.code === 413 ? 413 : 500;
+      if (code === 500) log.error('request failed', { url, err: String(e) });
+      if (!res.headersSent) {
+        sendJson(res, code, { error: { code: code === 413 ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL', message: code === 413 ? '请求体超过 2MB' : '服务内部错误' } });
+      } else {
+        res.end();
+      }
+    }
+  });
+  return server;
+}
+
+// ---------------------------------------------------------------------------
+// 心跳（60s；失败退避至 300s；恢复即补跳）
+// ---------------------------------------------------------------------------
+
+function startHeartbeat(cfg, log) {
+  let interval = Math.max(10, cfg.heartbeatIntervalS) * 1000;
+  let stopped = false;
+  let timer = null;
+
+  async function beat() {
+    if (stopped) return;
+    try {
+      const res = await fetch(`${cfg.hubUrl}/api/v1/heartbeat`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${cfg.agentToken}` },
+        body: '{}',
+      });
+      if (res.ok) {
+        interval = Math.max(10, cfg.heartbeatIntervalS) * 1000; // 恢复正常节奏
+      } else {
+        log.warn('heartbeat rejected', { status: res.status });
+        interval = Math.min(interval * 2, HEARTBEAT_MAX_S * 1000);
+      }
+    } catch (e) {
+      log.warn('heartbeat failed (will backoff)', { err: String(e).slice(0, 120), next_s: Math.round(interval / 1000) });
+      interval = Math.min(interval * 2, HEARTBEAT_MAX_S * 1000);
+    }
+    timer = setTimeout(beat, interval);
+    timer.unref?.();
+  }
+
+  beat();
+  return { stop() { stopped = true; if (timer) clearTimeout(timer); } };
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.command === 'help' || !args.command) {
+    usage();
+    process.exit(args.command ? 0 : 1);
+  }
+  if (args.command === 'version') {
+    console.log(`kizuna-box v${VERSION}`);
+    return;
+  }
+  const cfgPath = path.resolve(args.config ?? defaultConfigPath());
+
+  if (args.command === 'enroll') {
+    await enroll(cfgPath);
+    return;
+  }
+
+  // run
+  const cfg = loadConfig(cfgPath);
+  if (!cfg.agentId || !cfg.agentToken || !cfg.endpointSecret) {
+    console.error('config.json 缺少 agent_id / agent_token / endpoint_secret —— 请先运行 enroll 或安装脚本');
+    process.exit(1);
+  }
+  ensureDirs(cfg);
+  const log = createLogger(cfg.logDir);
+  log.info('kizuna-box starting', { version: VERSION, agent_id: cfg.agentId, hub: cfg.hubUrl, port: cfg.listenPort });
+
+  const server = startServer(cfg, log);
+  server.listen(cfg.listenPort, cfg.listenHost, () => {
+    log.info('listening', { host: cfg.listenHost, port: cfg.listenPort, webhook: cfg.webhookUrl });
+  });
+  server.on('error', (e) => {
+    log.error('server error', { err: String(e) });
+    process.exit(1);
+  });
+
+  const hb = startHeartbeat(cfg, log);
+
+  const shutdown = (signal) => {
+    log.info('shutting down', { signal });
+    hb.stop();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('uncaughtException', (e) => {
+    log.error('uncaught exception', { err: String(e && e.stack ? e.stack : e) });
+    // 保持进程存活，交给服务管理器决定；但落盘错误等致命问题直接退出由服务拉起
+  });
+}
+
+main().catch((e) => {
+  console.error('[kizuna-box] fatal:', e);
+  process.exit(1);
+});

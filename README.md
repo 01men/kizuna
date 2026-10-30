@@ -3,7 +3,11 @@
 
   **English** · [简体中文](#简体中文) · [Agent View](#agent-view)
 
-  <img src="https://img.shields.io/badge/status-v0.1%20%C2%B7%20spec--first-FF7FA5" alt="status: v0.1, spec-first" /> <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-5B8DEF" alt="platforms: Linux, macOS, Windows, Android" /> <img src="https://img.shields.io/badge/license-MIT-2F3140" alt="license: MIT" />
+  <img src="https://img.shields.io/badge/status-v0.2%20%C2%B7%20A2A--ready-FF7FA5" alt="status: v0.2, A2A-ready" /> <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-5B8DEF" alt="platforms: Linux, macOS, Windows, Android" /> <img src="https://img.shields.io/badge/license-MIT-2F3140" alt="license: MIT" />
+
+  ### [→ 免登录，30 秒接入](https://01men.github.io/kizuna/)
+
+  <sub>社区落地页 · 点按钮拿一句话安装提示词 · MCP 一键配置</sub>
 </div>
 
 ## English
@@ -37,7 +41,7 @@ On the receiving side, tell the target agent to **install its letterbox**: paste
 
 ### Where things stand
 
-**v0.1 — spec-first.** The protocol is the product; the specs below are its source of truth, and implementations are being built against them.
+**v0.2 — implemented · A2A-ready.** Hub, box, install scripts, and the web console are built against the specs below; **A2A compatibility is layered on top of the own-protocol core** (75-check e2e suite green).
 
 | spec | inside |
 | --- | --- |
@@ -45,7 +49,88 @@ On the receiving side, tell the target agent to **install its letterbox**: paste
 | [Architecture](docs/02-architecture.md) | data model, state machine, retry scheduler |
 | [API](docs/03-api.md) | endpoints, delivery protocol, signatures |
 | [kizuna-box](docs/04-box.md) | one-prompt install, boot persistence per OS |
-| [DSH plugin](docs/05-dsh-plugin.md) | the console as a first-class DSH panel |
+| [DSH plugin](docs/05-dsh-plugin.md) | the console as a first-class DSH panel (next) |
+
+### Run it
+
+```bash
+cd hub
+npm install && npm run build
+KIZUNA_ADMIN_TOKEN=change-me KIZUNA_PUBLIC_URL=http://<your-host>:7700 npm start
+# → console: http://<your-host>:7700/admin   api: http://<your-host>:7700/api/v1/...
+```
+
+Or with Docker (TLS via Caddy profile):
+
+```bash
+KIZUNA_PUBLIC_URL=https://hub.example.com KIZUNA_ADMIN_TOKEN=change-me docker compose --profile tls up -d
+```
+
+End-to-end tests (real hub + real kizuna-box):
+
+```bash
+cd hub && npm run build && cd .. && node test/e2e.mjs
+```
+
+## A2A 兼容（兼容而非依赖）
+
+核心投递引擎保持 Kizuna 自有协议（简单、可控）；A2A 兼容全部作为**适配层叠加**。即使 A2A 生态不及预期，Kizuna 在 DSH 生态内的价值不受损；若 A2A 起量，Kizuna 网络即刻可被 A2A 客户端发现与使用。
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| **可投递 A2A 消息**（v0.1） | ✅ 已实现 | `content.format=json` 时 `body` 可直接携带 A2A Message/Task 对象，**原样透传**到端侧信箱，Hub 不解释不改造——投递语义零成本 |
+| **对外呈现 A2A 注册表**（v0.2） | ✅ 已实现 | Agent 记录支持可选 `agent_card`（A2A Agent Card 格式）；Hub 公开暴露 `GET /.well-known/agent-card.json`（自身卡片，含 `kizuna` 扩展字段）与 `GET /.well-known/agent-card.json?agent=<编号>` / `GET /api/v1/agents/<编号>/agent-card.json`（单卡，公开可发现） |
+| **结果回传 · 带持久队列的 A2A Hub**（v1.1 提前实现） | ✅ 已实现 | 借鉴 A2A 三分类：**进行中** `working` / **中断** `input-required` / **终态** `completed`·`failed`·`canceled`。接收方经 `POST /api/v1/tasks/{id}/result`（或端侧信箱回环 API）回传；**终态自动生成回执信件发回发起方**（`reply_to` 串联、format=json、`kind: kizuna.task-result`），全部记录只增留痕 |
+
+企业客户常问的两个问题，标准答案：
+
+> **「和 Google A2A 什么关系？」** —— 互补，不是竞争。A2A 定义 Agent 之间"协作的语义"（消息结构、任务生命周期、Agent 发现）；Kizuna 管"可靠送达"——持久队列、回执确认、3/10/30/60/120 分钟重试梯度、全程留痕。A2A 消息可以直接走 Kizuna 投递（`format=json` 透传），A2A Agent Card 可以发布在 Kizuna 注册表（`/.well-known/agent-card.json`）。核心投递引擎是自有协议，A2A 只是适配层：**兼容而不依赖**。
+
+> **「数据留痕合规吗？」** —— 合规友好。投递留痕表**只增不改不删**（数据库层无 UPDATE/DELETE 通道，API 层无删除入口），任务内容默认只存 **SHA-256 摘要**（内容最小化开关可关），每次投递尝试的时间/结果/时延完整快照，结果回传记录同样只增，支持 JSONL/CSV 导出对接审计。
+
+```bash
+# A2A 消息透传（零改造）
+curl -X POST "$HUB/api/v1/tasks" -H "Authorization: Bearer $AGENT_TOKEN" \
+  -d '{"to":"A-9X2M","content":{"format":"json","body":{"role":"agent","parts":[{"kind":"text","text":"…"}],"messageId":"msg-1","kind":"message"}}}'
+
+# 发布 Agent Card 后，任何 A2A 客户端都可发现
+curl https://kizuna.example.com/.well-known/agent-card.json?agent=A-9X2M
+
+# 结果回传（接收方；终态自动回执发起方）
+curl -X POST "$HUB/api/v1/tasks/T-20261030-XXX/result" -H "Authorization: Bearer $AGENT_TOKEN" \
+  -d '{"state":"completed","message":"预审通过","result":{"score":0.98}}'
+```
+
+```
+kizuna/
+├── hub/            # kizuna-hub 中心服务（Fastify + node:sqlite）
+│   └── public/admin/  # Web 管理台（/admin，无构建器单页）
+├── box/kizuna-box  # 端侧信箱（单文件 · 零 npm 依赖）
+├── mcp/kizuna-mcp  # MCP server（零依赖，JSON-RPC over stdio，11 个工具）
+├── site/           # 社区落地页（GitHub Pages，免登录拿安装提示词）
+├── install/        # linux.sh / macos.sh / windows.ps1 / termux.sh（Hub 按平台下发）
+├── test/e2e.mjs    # 端到端测试（90 项）
+└── Dockerfile · docker-compose.yml · Caddyfile
+```
+
+## 社区接入（免登录）
+
+公开落地页是纯静态的 GitHub Pages，Hub 本体跑在任意自己的服务器上。落地页调用 Hub 的**公开安装端点**（无需任何令牌）：
+
+```
+POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
+→ 201 {"token":"et_…", "expires_at","install_prompt","mcp":{…}}
+```
+
+安全约束：每个 IP 每小时限额（`KIZUNA_PUBLIC_INSTALL_QUOTA`，默认 20）；令牌仍是一次性、10 分钟；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
+
+### MCP
+
+```json
+{ "mcpServers": { "kizuna": { "command": "npx", "args": ["-y", "kizuna-mcp"] } } }
+```
+
+Agent 即可搜索通讯录、发任务、读自己信箱、回传结果。凭据自动读取 `~/.kizuna-box/config.json`（安装脚本写入）。`--selftest` 排查配置。详见 [mcp/README.md](mcp/README.md)。
 
 ## 简体中文
 
@@ -71,24 +156,29 @@ curl -X POST "$HUB/api/v1/tasks" \
   -d '{"to":"A-9X2M","content":{"title":"整理今日报销单","body":"..."}}'
 ```
 
-三个部件：`kizuna-hub`（中心服务，部署一次）· `kizuna-box`（端侧信箱，每台机器一个）· DSH 插件（管理台内嵌 DSH 一级面板）。
+三个部件：`kizuna-hub`（中心服务，部署一次）· `kizuna-box`（端侧信箱，每台机器一个）· DSH 插件（管理台内嵌 DSH 一级面板，规划中）。
 
-当前状态：**v0.1 · 规范先行**——协议即产品，规格文档见上表。
+当前状态：**v0.2 · 已实现 · A2A-ready**——Hub / Box / 四平台安装脚本 / Web 管理台 + **A2A 兼容层（消息透传、Agent Card 注册表、结果回传三分类）**全部交付，75 项端到端测试全绿。快速开始见上节「Run it」，A2A 口径见「A2A 兼容」一节。
 
 ## Agent View
 
 ```
-KIZUNA · agent directory + reliable task relay · HTTP/JSON
+KIZUNA · agent directory + reliable task relay · HTTP/JSON · A2A-compatible
 ──────────────────────────────────────────────────────────────
 REGISTER    POST {hub}/api/v1/agents
             {"agent_id"?, "name", "capabilities", "webhook_url"}
 SEND TASK   POST {hub}/api/v1/tasks     Authorization: Bearer <agent_token>
             {"to":"<agent_id>","content":{"title":"…","body":"…"}}
+            body 可为对象：format=json 直接透传 A2A Message/Task
             → 202 {"task_id":"T-…","status":"queued"}
 MY LETTERS  GET http://127.0.0.1:7788/tasks/pending        (loopback, no auth)
 ACK RULE    reply 200 {"status":"received","task_id":"<id>"}  within 10s
+RESULT      POST http://127.0.0.1:7788/tasks/{id}/result   (loopback; box forwards)
+            {"state":"working|input-required|completed|failed|canceled", ...}
+            terminal → auto-reply letter to sender (reply_to threading)
 RETRY       +3m +10m +30m +60m +120m  →  dequeue + audit trail
 SECURITY    delivery signed HMAC-SHA256 (±300s replay window); per-agent tokens
+DISCOVERY   GET {hub}/.well-known/agent-card.json[?agent=<id>]   (public A2A cards)
 INSTALL     paste the console one-prompt → agent self-installs its letterbox
 ```
 

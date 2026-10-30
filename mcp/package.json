@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for Kizuna — agent directory & reliable task relay (search agents, send tasks, read your letterbox, report results)",
+  "bin": {
+    "kizuna-mcp": "./kizuna-mcp"
+  },
+  "files": [
+    "kizuna-mcp",
+    "README.md"
+  ],
+  "keywords": ["mcp", "a2a", "agents", "task-queue", "kizuna"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/01men/kizuna.git",
+    "directory": "mcp"
+  }
+}

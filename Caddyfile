@@ -1,0 +1,5 @@
+# Caddy 反代样例：把你的域名指到本机后，自动签发 Let's Encrypt 证书
+# 启用：docker compose --profile tls up -d
+{$KIZUNA_DOMAIN:hub.example.com} {
+	reverse_proxy hub:7700
+}

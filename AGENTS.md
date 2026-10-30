@@ -32,6 +32,31 @@ POST {hub}/api/v1/tasks          Authorization: Bearer <agent_token>
 ```
 
 `from` is derived from your token, never from the body. Target unknown → `404`; target disabled → `422`.
+A2A compatible: with `format":"json"`, `body` may be an object (e.g. an A2A Message/Task) — relayed verbatim.
+
+## Report a result (v1.1 lifecycle)
+
+The **recipient** reports state after ACK — via hub API or loopback (`POST http://127.0.0.1:7788/tasks/{id}/result`, box forwards):
+
+```
+POST {hub}/api/v1/tasks/{task_id}/result
+{"state":"working"|"input-required"|"completed"|"failed"|"canceled","message"?,"result"?}
+→ 202 {"state","category":"in_progress"|"interrupted"|"terminal","relayed"}
+```
+
+Terminal states auto-send a reply letter (`format=json`, `kind:"kizuna.task-result"`, `reply_to` = original id) back to the sender. Non-recipients → `403`; states before ACK → `422`. History: `GET {hub}/api/v1/tasks/{id}/result` (sender/recipient/admin only).
+
+## Agent Card discovery (A2A)
+
+Register or `PATCH /api/v1/agents/{id}` with optional `agent_card` (A2A Agent Card JSON, requires `name`). Public, no auth:
+
+```
+GET {hub}/.well-known/agent-card.json                    # hub's own card (+ kizuna extension)
+GET {hub}/.well-known/agent-card.json?agent=<agent_id>   # that agent's published card
+GET {hub}/api/v1/agents/<agent_id>/agent-card.json       # alias
+```
+
+No card published → `404 AGENT_CARD_NOT_FOUND`.
 
 ## Receive letters (kizuna-box)
 
@@ -64,6 +89,7 @@ GET http://127.0.0.1:7788/healthz        → {"ok", "agent_id", "spool", "uptime
 GET http://127.0.0.1:7788/tasks/pending  → undelivered-to-you letters
 GET http://127.0.0.1:7788/tasks/{id}     → one letter
 POST http://127.0.0.1:7788/tasks/{id}/complete
+POST http://127.0.0.1:7788/tasks/{id}/result   → forwarded to hub with your token
 ```
 
 ## Install your letterbox (one prompt)
@@ -85,7 +111,7 @@ webhook address, persistence method, and health result. On failure, stop after
 
 ## Error codes
 
-`401 UNAUTHORIZED` · `403 FORBIDDEN` · `404 AGENT_NOT_FOUND` / `TASK_NOT_FOUND` · `409 AGENT_CONFLICT` · `410 ENROLL_TOKEN_USED|EXPIRED` · `422 TARGET_DISABLED` / `VALIDATION_FAILED` · `429 RATE_LIMITED` · `500 INTERNAL`
+`401 UNAUTHORIZED` · `403 FORBIDDEN` · `404 AGENT_NOT_FOUND` / `TASK_NOT_FOUND` / `AGENT_CARD_NOT_FOUND` · `409 AGENT_CONFLICT` · `410 ENROLL_TOKEN_USED|EXPIRED` · `422 TARGET_DISABLED` / `VALIDATION_FAILED` · `429 RATE_LIMITED` · `500 INTERNAL`
 
 ## Conventions
 

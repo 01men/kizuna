@@ -1,0 +1,356 @@
+#!/usr/bin/env node
+/*
+ * kizuna-mcp — MCP server for the Kizuna agent directory & task relay
+ *
+ * 零 npm 依赖（仅 node:*），JSON-RPC 2.0 over stdio（MCP 规范 2024-11-05）。
+ * 让任何支持 MCP 的 Agent（Claude Desktop / Cursor / DSH / …）直接：
+ *   发现 Agent → 发信 → 读信箱 → 回执 → 回传结果
+ *
+ * 配置（任一来源，优先级从高到低）：
+ *   环境变量  KIZUNA_HUB_URL、KIZUNA_AGENT_TOKEN、KIZUNA_ADMIN_TOKEN、KIZUNA_BOX_URL
+ *   配置文件  ~/.kizuna-box/config.json（安装脚本会写好 hub_url / agent_token）
+ *
+ * 用法：
+ *   npx -y kizuna-mcp                      # stdio，供 MCP 客户端拉起
+ *   kizuna-mcp --selftest                  # 打印工具清单与连通性（人工排障）
+ */
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const readline = require('node:readline');
+
+const VERSION = '0.2.0';
+const PROTOCOL_VERSION = '2024-11-05';
+
+// ---------------------------------------------------------------------------
+// 配置
+// ---------------------------------------------------------------------------
+
+function loadConfig() {
+  const cfgPath = process.env.KIZUNA_BOX_CONFIG ?? path.join(os.homedir(), '.kizuna-box', 'config.json');
+  let file = {};
+  try { file = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { /* 未安装端侧服务 */ }
+  return {
+    hubUrl: (process.env.KIZUNA_HUB_URL || file.hub_url || '').replace(/\/+$/, ''),
+    agentToken: process.env.KIZUNA_AGENT_TOKEN || file.agent_token || '',
+    adminToken: process.env.KIZUNA_ADMIN_TOKEN || '',
+    boxUrl: (process.env.KIZUNA_BOX_URL || `http://127.0.0.1:${file.listen?.port ?? 7788}`).replace(/\/+$/, ''),
+    agentId: file.agent_id || '',
+  };
+}
+
+async function call(cfg, { method = 'GET', path: p, body, auth = 'agent', timeoutMs = 20000 }) {
+  const base = cfg.hubUrl;
+  if (!base) throw new Error('未配置 hub：设置 KIZUNA_HUB_URL 或先运行安装脚本生成 ~/.kizuna-box/config.json');
+  const token = auth === 'admin' ? cfg.adminToken : cfg.agentToken;
+  if (!token) throw new Error(`缺少${auth === 'admin' ? '管理员' : ' Agent'}令牌：设置 KIZUNA_${auth === 'admin' ? 'ADMIN' : 'AGENT'}_TOKEN`);
+  const res = await fetch(base + p, {
+    method,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 2000) }; }
+  if (!res.ok) {
+    const err = json?.error ?? {};
+    throw new Error(`${res.status} ${err.code ?? ''} ${err.message ?? text.slice(0, 200)}`.trim());
+  }
+  return json;
+}
+
+async function boxCall(cfg, { method = 'GET', path: p, body }) {
+  const res = await fetch(cfg.boxUrl + p, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 2000) }; }
+  if (!res.ok) throw new Error(`${res.status} ${json?.error?.message ?? text.slice(0, 200)}`);
+  return json;
+}
+
+// ---------------------------------------------------------------------------
+// 工具定义
+// ---------------------------------------------------------------------------
+
+const TOOLS = [
+  {
+    name: 'kizuna_list_agents',
+    description: '列出/检索 Kizuna 通讯录中的 Agent（编号、名称、能力、状态）。用它可以找到该把任务派给谁。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: '关键词（匹配编号/名称/能力）' },
+        tag: { type: 'string', description: '能力标签精确匹配' },
+        status: { type: 'string', enum: ['online', 'offline', 'unknown'], description: '在线状态过滤' },
+        limit: { type: 'number', description: '返回条数，默认 50' },
+      },
+    },
+  },
+  {
+    name: 'kizuna_get_agent',
+    description: '查看单个 Agent 详情（能力声明、webhook、在线状态、已发布的 A2A Agent Card、近期收发）。',
+    inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
+  },
+  {
+    name: 'kizuna_send_task',
+    description:
+      '向另一个 Agent 可靠投递任务包（信件）。支持 A2A：content.format="json" 时 content.body 可直接传 A2A Message/Task 对象。' +
+      '投递带重试梯度与回执确认，返回 task_id 供后续查询结果。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: '目标 Agent 编号，如 A-9X2M' },
+        title: { type: 'string', description: '任务标题（可选）' },
+        body: { type: ['string', 'object'], description: '任务内容；对象需配合 format=json（可传 A2A Message/Task）' },
+        format: { type: 'string', enum: ['text', 'markdown', 'json'], description: '内容格式，默认 text' },
+        priority: { type: 'string', enum: ['normal', 'high'], description: '优先级，默认 normal' },
+        deadline: { type: 'string', description: '截止时间（UTC ISO8601，可选）' },
+      },
+      required: ['to', 'body'],
+    },
+  },
+  {
+    name: 'kizuna_get_task',
+    description: '查询一封在途/已终态任务的详情：状态、已试次数、逐次尝试明细（时间/结果/HTTP 码/时延）。',
+    inputSchema: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+  },
+  {
+    name: 'kizuna_list_my_letters',
+    description: '读取本机信箱中尚未取走的信件（走 127.0.0.1 回环，无需令牌）。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'kizuna_read_letter',
+    description: '读取本机信箱中的某一封信（完整内容）。',
+    inputSchema: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+  },
+  {
+    name: 'kizuna_complete_letter',
+    description: '把某封信标记为已处理并归档到本机信箱（仅影响本地展示，不影响 Hub 留痕）。',
+    inputSchema: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+  },
+  {
+    name: 'kizuna_report_result',
+    description:
+      '回传任务结果（接收方使用）：state=working(进行中) / input-required(等待输入) / completed·failed·canceled(终态)。' +
+      '终态会自动生成回执信件发回发起方。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string' },
+        state: { type: 'string', enum: ['working', 'input-required', 'completed', 'failed', 'canceled'] },
+        message: { type: 'string', description: '给发起方的说明（可选）' },
+        result: { description: '结构化结果（任意 JSON，可选）' },
+        suppress_reply: { type: 'boolean', description: '终态时不自动回执发起方（默认 false）' },
+      },
+      required: ['task_id', 'state'],
+    },
+  },
+  {
+    name: 'kizuna_get_results',
+    description: '查看某任务的全部结果回传记录（进行中/中断/终态三分类时间线）。',
+    inputSchema: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+  },
+  {
+    name: 'kizuna_get_agent_card',
+    description: '获取 A2A Agent Card（公开）：不传 agent_id 得到 Hub 自身卡片，传则得到该 Agent 已发布的卡片。',
+    inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } } },
+  },
+  {
+    name: 'kizuna_whoami',
+    description: '查看当前 MCP 连接的身份与 Hub 地址（排障用）。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// 工具实现
+// ---------------------------------------------------------------------------
+
+const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
+
+async function handleTool(cfg, name, args) {
+  switch (name) {
+    case 'kizuna_list_agents': {
+      const p = new URLSearchParams();
+      if (args.q) p.set('q', String(args.q));
+      if (args.tag) p.set('tag', String(args.tag));
+      if (args.status) p.set('status', String(args.status));
+      p.set('limit', String(Math.min(Number(args.limit) || 50, 200)));
+      const r = await call(cfg, { path: `/api/v1/agents?${p}` });
+      return text(r.items.map((a) => ({
+        agent_id: a.agent_id, name: a.name, capabilities: a.capabilities, tags: a.capability_tags,
+        status: a.status, enabled: a.enabled, has_agent_card: Boolean(a.agent_card),
+      })).concat([{ total: r.total }]));
+    }
+    case 'kizuna_get_agent': {
+      return text(await call(cfg, { path: `/api/v1/agents/${encodeURIComponent(args.agent_id)}` }));
+    }
+    case 'kizuna_send_task': {
+      const content = { body: args.body };
+      if (args.title) content.title = String(args.title);
+      if (args.format) content.format = String(args.format);
+      else if (typeof args.body === 'object') content.format = 'json';
+      if (args.priority) content.priority = String(args.priority);
+      if (args.deadline) content.deadline = String(args.deadline);
+      return text(await call(cfg, { method: 'POST', path: '/api/v1/tasks', body: { to: args.to, content } }));
+    }
+    case 'kizuna_get_task': {
+      return text(await call(cfg, { path: `/api/v1/tasks/${encodeURIComponent(args.task_id)}` }));
+    }
+    case 'kizuna_list_my_letters': {
+      return text(await boxCall(cfg, { path: '/tasks/pending' }));
+    }
+    case 'kizuna_read_letter': {
+      return text(await boxCall(cfg, { path: `/tasks/${encodeURIComponent(args.task_id)}` }));
+    }
+    case 'kizuna_complete_letter': {
+      return text(await boxCall(cfg, { method: 'POST', path: `/tasks/${encodeURIComponent(args.task_id)}/complete`, body: {} }));
+    }
+    case 'kizuna_report_result': {
+      // 优先走本机 box（它会用端侧令牌转发，且能顺带归档信件）；无 box 时直连 Hub
+      const payload = { state: args.state };
+      if (args.message !== undefined) payload.message = String(args.message);
+      if (args.result !== undefined) payload.result = args.result;
+      if (args.suppress_reply !== undefined) payload.suppress_reply = Boolean(args.suppress_reply);
+      try {
+        return text(await boxCall(cfg, { method: 'POST', path: `/tasks/${encodeURIComponent(args.task_id)}/result`, body: payload }));
+      } catch (e) {
+        if (!cfg.agentToken) throw e;
+        return text(await call(cfg, { method: 'POST', path: `/api/v1/tasks/${encodeURIComponent(args.task_id)}/result`, body: payload }));
+      }
+    }
+    case 'kizuna_get_results': {
+      return text(await call(cfg, { path: `/api/v1/tasks/${encodeURIComponent(args.task_id)}/result` }));
+    }
+    case 'kizuna_get_agent_card': {
+      const p = args.agent_id ? `/.well-known/agent-card.json?agent=${encodeURIComponent(args.agent_id)}` : '/.well-known/agent-card.json';
+      const res = await fetch(cfg.hubUrl + p, { signal: AbortSignal.timeout(15000) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(`${res.status} ${body?.error?.code ?? ''} ${body?.error?.message ?? ''}`.trim());
+      return text(body);
+    }
+    case 'kizuna_whoami': {
+      return text({
+        hub_url: cfg.hubUrl || '(未配置)',
+        agent_id: cfg.agentId || '(未知)',
+        has_agent_token: Boolean(cfg.agentToken),
+        has_admin_token: Boolean(cfg.adminToken),
+        box_url: cfg.boxUrl,
+        version: VERSION,
+      });
+    }
+    default:
+      throw new Error(`未知工具: ${name}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC over stdio
+// ---------------------------------------------------------------------------
+
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + '\n');
+}
+
+async function handleRpc(cfg, req) {
+  const { id, method, params } = req;
+  const isNotification = id === undefined || id === null;
+  try {
+    switch (method) {
+      case 'initialize':
+        return send({
+          jsonrpc: '2.0', id,
+          result: {
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: { tools: { listChanged: false } },
+            serverInfo: { name: 'kizuna', version: VERSION },
+            instructions:
+              'Kizuna 是 Agent 通讯录与可靠任务投递网络。用 kizuna_list_agents 找目标 Agent，' +
+              'kizuna_send_task 发任务（支持 A2A Message），kizuna_list_my_letters 读自己的信箱，' +
+              'kizuna_report_result 回传结果（终态自动回执发起方）。',
+          },
+        });
+      case 'notifications/initialized':
+      case 'initialized':
+        return undefined; // 通知：不响应
+      case 'ping':
+        return send({ jsonrpc: '2.0', id, result: {} });
+      case 'tools/list':
+        return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+      case 'tools/call': {
+        const name = params?.name;
+        const args = params?.arguments ?? {};
+        const tool = TOOLS.find((t) => t.name === name);
+        if (!tool) throw new Error(`未知工具: ${name}`);
+        const out = await handleTool(cfg, name, args);
+        return send({ jsonrpc: '2.0', id, result: out });
+      }
+      case 'resources/list':
+        return send({ jsonrpc: '2.0', id, result: { resources: [] } });
+      case 'prompts/list':
+        return send({ jsonrpc: '2.0', id, result: { prompts: [] } });
+      default:
+        if (isNotification) return undefined;
+        return send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });
+    }
+  } catch (e) {
+    if (isNotification) return undefined;
+    return send({
+      jsonrpc: '2.0', id,
+      result: { isError: true, content: [{ type: 'text', text: `错误: ${e instanceof Error ? e.message : String(e)}` }] },
+    });
+  }
+  return undefined;
+}
+
+async function selftest() {
+  const cfg = loadConfig();
+  console.log(`kizuna-mcp v${VERSION}`);
+  console.log(`hub_url        : ${cfg.hubUrl || '(未配置)'}`);
+  console.log(`agent_id       : ${cfg.agentId || '(未知)'}`);
+  console.log(`agent_token    : ${cfg.agentToken ? '已配置' : '(未配置)'}`);
+  console.log(`box_url        : ${cfg.boxUrl}`);
+  console.log(`tools (${TOOLS.length})     : ${TOOLS.map((t) => t.name).join(', ')}`);
+  if (cfg.hubUrl) {
+    try {
+      const r = await fetch(`${cfg.hubUrl}/healthz`, { signal: AbortSignal.timeout(10000) });
+      console.log(`hub healthz    : ${r.status} ${(await r.text()).slice(0, 120)}`);
+    } catch (e) {
+      console.log(`hub healthz    : 失败 ${e.message}`);
+    }
+  }
+}
+
+function main() {
+  if (process.argv.includes('--selftest')) {
+    selftest().catch((e) => { console.error(e.message); process.exit(1); });
+    return;
+  }
+  if (process.argv.includes('--version')) {
+    console.log(`kizuna-mcp v${VERSION}`);
+    return;
+  }
+  const cfg = loadConfig();
+  process.stderr.write(`[kizuna-mcp] v${VERSION} ready · hub=${cfg.hubUrl || '(未配置)'} agent=${cfg.agentId || '(未知)'}\n`);
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  let chain = Promise.resolve();
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let req;
+    try { req = JSON.parse(trimmed); } catch { return; }
+    // 串行处理，避免工具调用交错写 stdout
+    chain = chain.then(() => handleRpc(cfg, req)).catch(() => undefined);
+  });
+}
+
+main();

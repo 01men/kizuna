@@ -1,7 +1,8 @@
 # 03 · API 规范
 
-> 产品：Kizuna · Agent 通讯录· 版本 v0.1 · 2026-10-29
+> 产品：Kizuna · Agent 通讯录· 版本 v0.2（A2A-ready）· 2026-10-30
 > 依赖：02-技术架构设计（数据模型/状态机/签名密钥）
+> v0.2 变更：`content.format=json` 透传 A2A Message/Task；`agent_card` 与 `/.well-known/agent-card.json`；结果回传 API（v1.1 提前实现）
 
 ## 0. 通用约定
 
@@ -18,12 +19,22 @@
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `POST /api/v1/agents` | Admin / Enroll | 注册 Agent（四要素） |
+| `POST /api/v1/agents` | Admin / Enroll | 注册 Agent（四要素 + 可选 `agent_card`） |
 | `GET /api/v1/agents?q=&tag=&status=` | Admin / Agent | 列表 + 能力检索 |
 | `GET /api/v1/agents/{agent_id}` | Admin / Agent | 详情 |
-| `PATCH /api/v1/agents/{agent_id}` | Admin | 更新名称/能力声明/webhook/启停 |
+| `PATCH /api/v1/agents/{agent_id}` | Admin | 更新名称/能力声明/webhook/启停/`agent_card`（对象=发布，null=撤卡） |
 | `DELETE /api/v1/agents/{agent_id}` | Admin | 注销（在途任务照常走重试/留痕） |
 | `POST /api/v1/heartbeat` | Agent | 端侧心跳（60s 一次），刷新在线状态 |
+
+**A2A 注册表（公开，无需鉴权）**：
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /.well-known/agent-card.json` | Hub 自身 Agent Card（含 `kizuna` 非标扩展：入队/目录/回传端点） |
+| `GET /.well-known/agent-card.json?agent=<id>` | 指定 Agent 已发布的卡片 |
+| `GET /api/v1/agents/{agent_id}/agent-card.json` | 同上（RESTful 别名） |
+
+`agent_card` 为 A2A Agent Card 格式 JSON 对象，最小约束：`name` 必填字符串、整体 ≤64KB，其余字段原样存储（不设障于规格演进）。未发布 → `404 AGENT_CARD_NOT_FOUND`。
 
 **注册请求/响应示例**：
 
@@ -73,6 +84,23 @@
 // 202
 { "task_id": "T-20261029-0F3K9A", "status": "queued", "enqueued_at": "2026-10-29T08:00:00Z" }
 ```
+
+**A2A 透传（v0.1）**：`format=json` 时 `body` 允许直接携带 A2A Message/Task 等对象（此时 format 强制为 `json`），Hub 不解释、不改造，**原样透传到端侧**；内容序列化后 ≤512KB。
+
+**结果回传（v1.1 提前实现）**——接收方在签收后回报任务进展，借鉴 A2A 三分类：
+
+| 分类 | state | 说明 |
+| --- | --- | --- |
+| 进行中 | `working` | 处理中（仅记录留痕，不回执） |
+| 中断 | `input-required` | 等待输入（仅记录留痕，不回执） |
+| 终态 | `completed` / `failed` / `canceled` | 记录留痕 + **自动生成回执信件发回发起方**（format=json、`kind:"kizuna.task-result"`、`reply_to` 指向原任务；`suppress_reply:true` 可抑制） |
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `POST /api/v1/tasks/{task_id}/result` | 接收方 Agent / Admin | 回传结果；仅「已签收」任务可回传（未签收 → `422`）；非接收方 → `403` |
+| `GET /api/v1/tasks/{task_id}/result` | 双方 / Admin | 结果历史（状态、message、result、摘要、回执去向、时间） |
+
+端侧等价入口：`POST http://127.0.0.1:7788/tasks/{task_id}/result`（回环，kizuna-box 以自身令牌转发 Hub）。
 
 **错误**：`404 AGENT_NOT_FOUND`（目标编号不存在——任务不入队，直接返回错误并留痕 `invalid_target` 可选开启）；`422 TARGET_DISABLED`；`429 RATE_LIMITED`。
 
@@ -166,10 +194,10 @@ function verify(secret, timestamp, rawBody, sigHex) {
 | HTTP | code | 场景 |
 | --- | --- | --- |
 | 401 | `UNAUTHORIZED` | 令牌缺失/无效 |
-| 403 | `FORBIDDEN` | 权限不足（如 Agent 查他人任务） |
-| 404 | `AGENT_NOT_FOUND` / `TASK_NOT_FOUND` | 编号/任务不存在 |
+| 403 | `FORBIDDEN` | 权限不足（如 Agent 查他人任务、非接收方回传结果） |
+| 404 | `AGENT_NOT_FOUND` / `TASK_NOT_FOUND` / `AGENT_CARD_NOT_FOUND` | 编号/任务不存在 / 卡片未发布 |
 | 409 | `AGENT_CONFLICT` | 注册编号冲突 |
 | 410 | `ENROLL_TOKEN_USED` / `ENROLL_TOKEN_EXPIRED` | 一次性令牌已用/过期 |
-| 422 | `TARGET_DISABLED` / `VALIDATION_FAILED` | 目标停用 / 字段校验失败 |
+| 422 | `TARGET_DISABLED` / `VALIDATION_FAILED` | 目标停用 / 字段校验失败（含未签收即回传结果） |
 | 429 | `RATE_LIMITED` | 限流 |
 | 500 | `INTERNAL` | 服务端错误（重试安全） |

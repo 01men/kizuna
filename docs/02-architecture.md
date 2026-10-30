@@ -1,7 +1,8 @@
 # 02 · 技术架构设计
 
-> 产品：Kizuna · Agent 通讯录· 版本 v0.1 · 2026-10-29
+> 产品：Kizuna · Agent 通讯录· 版本 v0.2（A2A-ready）· 2026-10-30
 > 上游文档：01-PRD · 下游：03-API规范 / 04-端侧Agent服务设计 / 05-DSH插件与管理界面设计
+> v0.2 变更：`agents.agent_card` / `tasks.reply_to` 列、`task_results` 只增表；结果回传三分类（进行中/中断/终态，借鉴 A2A）。A2A 兼容为适配层，核心投递引擎保持自有协议。
 
 ## 1. 总体架构
 
@@ -133,7 +134,24 @@ CREATE TABLE enroll_tokens (
   expires_at TEXT NOT NULL,
   used_at    TEXT
 );
+
+-- 结果回传（v1.1）：签收后的任务生命周期，借鉴 A2A 三分类。只增不改不删。
+CREATE TABLE task_results (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id        TEXT NOT NULL,
+  reported_by    TEXT NOT NULL,              -- 回传方（接收方或 admin）
+  state          TEXT NOT NULL,              -- working / input-required / completed / failed / canceled
+  category       TEXT NOT NULL,              -- in_progress / interrupted / terminal（三分类）
+  message        TEXT,
+  result_json    TEXT,                       -- 结果负载（原样 JSON）
+  content_digest TEXT,                       -- result 的 SHA-256 摘要
+  relayed_to     TEXT,                       -- 终态自动回执的信件任务号（未回执为 NULL）
+  reported_at    TEXT NOT NULL
+);
+CREATE INDEX idx_results_task ON task_results(task_id, id);
 ```
+
+> v0.2 就地迁移（幂等）：`agents` 增加 `agent_card TEXT`（A2A Agent Card，原样 JSON），`tasks` 增加 `reply_to TEXT`（回执信件串联原任务）。v0.1 建库脚本对应语句为 `CREATE TABLE IF NOT EXISTS`，迁移由 Hub 启动时自动完成。
 
 ## 4. 任务包状态机
 
@@ -156,6 +174,25 @@ stateDiagram-v2
 ```
 
 > 终态任务从 `tasks` 删除（队列保持干净），完整快照写入 `audit_logs`。设计决策：`invalid_target` 不进重试——目标不存在时重试注定无意义，直接出队留痕，让失败尽早暴露（相对立项陈述的补充规则，已列入 PRD 追溯表）。
+
+### 4.1 结果回传生命周期（v1.1，借鉴 A2A 三分类）
+
+投递签收（`delivered_confirmed`）之后，任务进入**结果回传生命周期**，由接收方驱动、记录于 `task_results`（只增）：
+
+```mermaid
+stateDiagram-v2
+    [*] --> delivered_confirmed: 端侧回执 ACK（上表 delivered）
+    delivered_confirmed --> in_progress: 接收方回传 working（进行中）
+    in_progress --> interrupted: 回传 input-required（等待输入）
+    interrupted --> in_progress: 回传 working（恢复处理）
+    in_progress --> terminal: 回传 completed / failed / canceled
+    interrupted --> terminal: 回传 completed / failed / canceled
+    terminal --> [*]: 终态自动生成回执信件（reply_to 串联）→ 发起方按普通任务收信
+```
+
+- 分类：**进行中** `working` / **中断** `input-required` / **终态** `completed`·`failed`·`canceled`；
+- 进行中与中断仅记录留痕（避免信件风暴）；终态默认自动回执发起方（`suppress_reply` 可抑制）；
+- 回执信件是一条普通 json 任务（`kind:"kizuna.task-result"`），复用全部投递/重试/留痕机制——**Hub 无需第二套通道即成为「带持久队列的 A2A Hub」**。
 
 ## 5. 核心时序
 

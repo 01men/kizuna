@@ -1,0 +1,40 @@
+# Kizuna Hub 部署样例：hub + 卷 + Caddy TLS 反代（02 §10）
+# 用法：
+#   KIZUNA_PUBLIC_URL=https://hub.example.com KIZUNA_ADMIN_TOKEN=你的令牌 docker compose up -d
+# 仅内网试用（无 TLS）：
+#   KIZUNA_PUBLIC_URL=http://<本机IP>:7700 docker compose up -d hub
+services:
+  hub:
+    build: .
+    container_name: kizuna-hub
+    ports:
+      - "7700:7700"
+    volumes:
+      - hub-data:/data
+    environment:
+      # 不设置则首次启动自动生成并写入 /data/admin-token.json
+      KIZUNA_ADMIN_TOKEN: ${KIZUNA_ADMIN_TOKEN:-}
+      # 安装提示词/脚本内嵌的对外地址（端侧必须可达）
+      KIZUNA_PUBLIC_URL: ${KIZUNA_PUBLIC_URL:-http://localhost:7700}
+    restart: unless-stopped
+
+  # 可选：Caddy 反代终止 TLS（生产建议）。启用：docker compose --profile tls up -d
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    container_name: kizuna-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - hub
+    restart: unless-stopped
+
+volumes:
+  hub-data:
+  caddy-data:
+  caddy-config:
