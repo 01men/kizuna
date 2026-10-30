@@ -417,6 +417,29 @@ async function main() {
     }
     ok('公开安装限额触发 429', pubLimited);
 
+    console.log('▶ 社区零安装演示沙箱（免登录，真实写库）');
+    const demo = await fetch(`${HUB}/demo/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '演示信', body: '看看真实链路' }),
+    });
+    const demoJson = await demo.json();
+    ok('POST /demo/run 免令牌 201', demo.status === 201 && demoJson.ok === true, JSON.stringify(demoJson).slice(0, 160));
+    ok('演示返回 8 步且全部成功', Array.isArray(demoJson.steps) && demoJson.steps.length === 8 && demoJson.steps.every((s) => s.ok), `steps=${demoJson.steps?.length}`);
+    const forged = demoJson.steps.find((s) => s.step === 'HMAC 签名');
+    ok('签名步骤证明伪造密钥被拒', forged?.data?.forgery_rejected === true && String(forged.data.signature_head).startsWith('sha256='));
+    ok('演示产生真实留痕', demoJson.proof?.audit_log?.outcome === 'delivered_confirmed' && String(demoJson.proof.audit_log.content_digest).length === 64);
+    ok('演示走完结果三分类', demoJson.proof?.results?.map((r) => r.category).join(',') === 'in_progress,interrupted,terminal');
+    ok('演示终态自动回执', String(demoJson.proof?.reply_task_id ?? '').startsWith('T-'));
+    // 留痕真的可查（管理员视角）
+    const demoAudit = await api(`/api/v1/audit?limit=200`);
+    ok('演示留痕出现在留痕列表中', demoAudit.json.items.some((x) => x.log_id === demoJson.log_id));
+    // 临时 Agent 已清理，不进公开通讯录
+    const leftover = await api('/api/v1/agents?q=DEMO-&limit=50');
+    ok('演示临时 Agent 已清理（不留通讯录污染）', leftover.json.total === 0, `total=${leftover.json.total}`);
+    const demoBad = await fetch(`${HUB}/demo/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"title":"x","body":"y"}' });
+    ok('演示可重复调用（第二次仍成功）', demoBad.status === 201);
+
     console.log('▶ MCP server（JSON-RPC over stdio，真实进程）');
     const mcpEnv = { ...process.env, KIZUNA_HUB_URL: HUB, KIZUNA_AGENT_TOKEN: senderToken, KIZUNA_BOX_URL: `http://127.0.0.1:${BOX_PORT}` };
     const mcp = spawn(process.execPath, [path.join(ROOT, 'mcp', 'kizuna-mcp')], { env: mcpEnv, stdio: ['pipe', 'pipe', 'ignore'] });

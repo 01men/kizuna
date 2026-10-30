@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import crypto from 'node:crypto';
 import type { RouteCtx } from '../ctx.js';
 import { err } from '../errors.js';
 import { requireAny, requireAdmin, rateLimit, type AgentRow } from '../auth.js';
 import { findAgent } from '../registry.js';
 import { newTaskId, isSafeId } from '../ids.js';
 import { dequeueAndAudit, type AttemptSnapshot, type QueuedTaskRow } from '../audit.js';
+import { reportResult, resultsOf, deliveredAuditOf } from '../results.js';
 
 const TASK_BODY_SCHEMA = {
   type: 'object',
@@ -206,33 +206,6 @@ export default async function tasksRoutes(fastify: FastifyInstance, ctx: RouteCt
 
   // ---------- 结果回传（v1.1，A2A 三分类）：接收方 → Hub →（终态自动回执）发起方 ----------
 
-  const RESULT_STATES: Record<string, 'in_progress' | 'interrupted' | 'terminal'> = {
-    working: 'in_progress',
-    'input-required': 'interrupted',
-    completed: 'terminal',
-    failed: 'terminal',
-    canceled: 'terminal',
-  };
-
-  interface ResultRow {
-    id: number;
-    task_id: string;
-    reported_by: string;
-    state: string;
-    category: string;
-    message: string | null;
-    result_json: string | null;
-    content_digest: string | null;
-    relayed_to: string | null;
-    reported_at: string;
-  }
-
-  function deliveredAuditOf(taskId: string) {
-    return db
-      .prepare(`SELECT * FROM audit_logs WHERE task_id = ? AND outcome = 'delivered_confirmed' ORDER BY id DESC LIMIT 1`)
-      .get(taskId) as { to_agent: string; from_agent: string } | undefined;
-  }
-
   fastify.post('/api/v1/tasks/:task_id/result', async (req, reply) => {
     const auth = requireAny(req);
     const { task_id } = req.params as { task_id: string };
@@ -244,21 +217,8 @@ export default async function tasksRoutes(fastify: FastifyInstance, ctx: RouteCt
       suppress_reply?: boolean;
     };
 
-    const state = String(body.state ?? '');
-    const category = RESULT_STATES[state];
-    if (!category) {
-      throw err.validation(`state 必须是 ${Object.keys(RESULT_STATES).join(' / ')}（进行中/中断/终态三分类）`);
-    }
-    const message = body.message == null ? null : String(body.message);
-    if (message && message.length > 4000) throw err.validation('message 过长（≤4000）');
-    let resultJson: string | null = null;
-    if (body.result !== undefined && body.result !== null) {
-      resultJson = JSON.stringify(body.result);
-      if (Buffer.byteLength(resultJson) > 256 * 1024) throw err.validation('result 过大（序列化后 ≤256KB）');
-    }
-
     // 仅「已签收任务」的接收方可回传（管理员豁免）
-    const audit = deliveredAuditOf(task_id);
+    const audit = deliveredAuditOf(db, task_id);
     if (!audit) throw err.validation('任务尚未签收或不存在，不能回传结果');
     const principal = auth.agent?.agent_id ?? 'admin';
     if (auth.role !== 'admin' && auth.agent?.agent_id !== audit.to_agent) {
@@ -266,63 +226,27 @@ export default async function tasksRoutes(fastify: FastifyInstance, ctx: RouteCt
     }
     rateLimit(`result:${principal}`, 120);
 
-    // 终态默认自动回执：以接收方身份生成一条 json 任务发回发起方（带 reply_to 便于串联）
-    let relayed: { task_id: string; to: string } | null = null;
-    if (category === 'terminal' && body.suppress_reply !== true) {
-      const sender = findAgent(db, audit.from_agent);
-      if (sender && sender.enabled === 1) {
-        const reportedAt = new Date().toISOString();
-        let replyTaskId = newTaskId();
-        while (db.prepare('SELECT 1 FROM tasks WHERE task_id = ?').get(replyTaskId)) replyTaskId = newTaskId();
-        const replyContent = JSON.stringify({
-          title: `回执 ${task_id}`,
-          body: {
-            kind: 'kizuna.task-result',
-            task_id,
-            state,
-            message,
-            result: body.result ?? null,
-            reported_by: audit.to_agent,
-            reported_at: reportedAt,
-          },
-          format: 'json',
-          priority: 'normal',
-          deadline: null,
-        });
-        db.prepare(
-          `INSERT INTO tasks (task_id, from_agent, to_agent, title, content, format, priority, deadline,
-                              status, attempt_count, next_action_at, created_at, reply_to)
-           VALUES (?, ?, ?, ?, ?, 'json', 'normal', NULL, 'queued', 0, ?, ?, ?)`,
-        ).run(replyTaskId, audit.to_agent, audit.from_agent, `回执 ${task_id}`, replyContent, reportedAt, reportedAt, task_id);
-        relayed = { task_id: replyTaskId, to: audit.from_agent };
-        fastify.log.info({ task_id, reply_task_id: replyTaskId, state }, 'result relayed to sender');
-      }
-    }
+    const out = reportResult(db, {
+      taskId: task_id,
+      state: String(body.state ?? ''),
+      message: body.message,
+      result: body.result,
+      reportedBy: principal,
+      suppressReply: body.suppress_reply === true,
+      audit,
+    });
 
-    const reportedAt = new Date().toISOString();
-    const digest = crypto.createHash('sha256').update(resultJson ?? '').digest('hex');
-    db.prepare(
-      `INSERT INTO task_results (task_id, reported_by, state, category, message, result_json, content_digest, relayed_to, reported_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(task_id, principal, state, category, message, resultJson, digest, relayed?.task_id ?? null, reportedAt);
-
-    fastify.log.info({ task_id, state, category, by: principal }, 'result reported');
+    if (out.relayed) fastify.log.info({ task_id, reply_task_id: out.relayed.task_id, state: out.state }, 'result relayed to sender');
+    fastify.log.info({ task_id, state: out.state, category: out.category, by: principal }, 'result reported');
     reply.code(202);
-    return {
-      ok: true,
-      task_id,
-      state,
-      category,
-      recorded_at: reportedAt,
-      relayed,
-    };
+    return { ok: true, task_id, ...out };
   });
 
   fastify.get('/api/v1/tasks/:task_id/result', async (req) => {
     const auth = requireAny(req);
     const { task_id } = req.params as { task_id: string };
     if (!isSafeId(task_id)) throw err.taskNotFound(task_id);
-    const audit = deliveredAuditOf(task_id);
+    const audit = deliveredAuditOf(db, task_id);
     const inFlight = getTaskRow(db, task_id);
     if (!audit && !inFlight) throw err.taskNotFound(task_id);
     // 发起方 / 接收方 / 管理员可见
@@ -332,21 +256,7 @@ export default async function tasksRoutes(fastify: FastifyInstance, ctx: RouteCt
         (inFlight && (inFlight.from_agent === me || inFlight.to_agent === me)));
       if (!related) throw err.forbidden('仅任务相关方可以查看结果');
     }
-    const rows = db
-      .prepare('SELECT * FROM task_results WHERE task_id = ? ORDER BY id ASC')
-      .all(task_id) as ResultRow[];
-    return {
-      task_id,
-      items: rows.map((r) => ({
-        state: r.state,
-        category: r.category,
-        message: r.message,
-        result: r.result_json === null ? null : (JSON.parse(r.result_json) as unknown),
-        content_digest: r.content_digest,
-        reported_by: r.reported_by,
-        relayed_to: r.relayed_to,
-        reported_at: r.reported_at,
-      })),
-    };
+    return { task_id, items: resultsOf(db, task_id) };
   });
+
 }

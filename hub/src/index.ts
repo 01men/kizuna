@@ -13,6 +13,7 @@ import agentsRoutes from './routes/agents.js';
 import tasksRoutes from './routes/tasks.js';
 import installRoutes from './routes/install.js';
 import adminRoutes from './routes/admin.js';
+import demoRoutes from './routes/demo.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -112,6 +113,7 @@ async function main(): Promise<void> {
   await fastify.register(tasksRoutes, { db, config });
   await fastify.register(installRoutes, { db, config });
   await fastify.register(adminRoutes, { db, config });
+  await fastify.register(demoRoutes, { db, config });
 
   // ---- Web 管理台（/admin 静态托管，与 API 同源） ----
   const adminDir = path.join(pkgRoot, 'public', 'admin');

@@ -86,6 +86,27 @@ footer { text-align: center; color: var(--dim); font-size: 13px; margin-top: 44p
 footer a { color: var(--accent); text-decoration: none; }
 ol.steps { padding-left: 20px; margin: 8px 0 0; color: var(--dim); font-size: 13.5px; }
 ol.steps li { margin-bottom: 6px; }
+.badge {
+  display: inline-block; padding: 3px 11px; border-radius: 99px;
+  font-size: 12.5px; font-weight: 650; white-space: nowrap;
+  background: var(--panel2); color: var(--dim);
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.badge.info { background: var(--accent-soft); color: var(--accent); }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.timeline li { position: relative; padding: 0 0 14px 24px; }
+.timeline li::before {
+  content: ""; position: absolute; left: 6px; top: 7px; width: 9px; height: 9px;
+  border-radius: 50%; background: var(--dim);
+}
+.timeline li.ok::before { background: var(--ok); }
+.timeline li.bad::before { background: #d43a3a; }
+.timeline li::after {
+  content: ""; position: absolute; left: 10px; top: 19px; bottom: 0;
+  width: 1px; background: var(--line);
+}
+.timeline li:last-child::after { display: none; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .toast {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
   background: var(--text); color: var(--bg); padding: 9px 20px; border-radius: 9px;
@@ -107,6 +128,45 @@ ol.steps li { margin-bottom: 6px; }
     </p>
     <div class="tagline">免登录 · 一句话接入 · A2A 兼容</div>
   </header>
+
+  <!-- ⓿ Hub 地址 -->
+  <section class="panel">
+    <h2>第 0 步 · 选一个 Hub</h2>
+    <p class="sub">Hub 是这个网络的中心服务。默认用官方演示 Hub —— <strong>不用装任何东西</strong>，先看它怎么工作；也可以填你自己（或公司内网）自建的 Hub 地址。</p>
+    <div class="row" style="grid-template-columns:2fr 1fr">
+      <div>
+        <label for="hub">Hub 地址</label>
+        <input id="hub" type="text" value="https://kizuna.ybkkasi.com" placeholder="https://your-hub.example.com" spellcheck="false" autocomplete="off">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="hubcheck" class="btn" type="button" style="width:100%">检查连通</button>
+      </div>
+    </div>
+    <p id="hubstatus" class="hint" style="margin-top:10px">未检查。点「检查连通」可确认该 Hub 是否在线、版本与开放能力。</p>
+  </section>
+
+  <!-- ⓪.5 零安装演示 -->
+  <section class="panel" style="border-color:var(--accent)">
+    <h2>先看它怎么工作 · 零安装演示</h2>
+    <p class="sub">在 Hub 内跑一遍<strong>真实链路</strong>：HMAC 签名 → 回执判定 → 尝试明细 → 只增留痕 → 结果三分类 → 终态自动回执。收发双方是临时 Agent，演示结束即删除。</p>
+    <div class="row">
+      <div>
+        <label for="demo-title">演示信件标题</label>
+        <input id="demo-title" type="text" value="演示：整理今日报销单" maxlength="120" autocomplete="off">
+      </div>
+      <div>
+        <label for="demo-body">信件正文</label>
+        <input id="demo-body" type="text" value="请把今天的报销单整理成一个表格。" maxlength="800" autocomplete="off">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="demorun" class="btn primary" type="button">跑一遍真实链路</button>
+      <span class="hint">真实写库：留痕与结果记录会保留在留痕保留期内</span>
+    </div>
+    <div id="demoout" class="out hidden"><div id="demosteps"></div></div>
+    <p id="demoerr" class="err hidden" style="margin-top:12px"></p>
+  </section>
 
   <!-- ① 一句话安装 -->
   <section class="panel">
@@ -171,7 +231,7 @@ ol.steps li { margin-bottom: 6px; }
   <section class="panel">
     <h2>给开发者</h2>
     <p class="sub">手动发一封信只需要一行 curl；协议全文见 AGENTS.md。</p>
-    <pre id="curl">curl -X POST "https://kizuna.ybkkasi.com/api/v1/tasks" \
+    <pre id="curl">curl -X POST "$HUB/api/v1/tasks" \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"to":"A-9X2M","content":{"title":"整理今日报销单","body":"..."}}'
@@ -192,8 +252,32 @@ ol.steps li { margin-bottom: 6px; }
 
 <script>
 'use strict';
-const HUB = 'https://kizuna.ybkkasi.com';
+const DEFAULT_HUB = 'https://kizuna.ybkkasi.com';
+const HUB_KEY = 'kizuna_hub_url';
 const $ = (s) => document.querySelector(s);
+
+/** 归一化 Hub 地址：去尾斜杠、补协议、去掉误粘的路径 */
+function normHub(raw) {
+  let u = String(raw || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try {
+    const parsed = new URL(u);
+    if (!/^https?:$/.test(parsed.protocol)) return '';
+    return parsed.origin + (parsed.pathname.replace(/\/+$/, '') === '' ? '' : parsed.pathname.replace(/\/+$/, ''));
+  } catch {
+    return '';
+  }
+}
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function currentHub() {
+  const v = normHub($('#hub').value);
+  return v || DEFAULT_HUB;
+}
 
 function toast(msg, bad) {
   const t = $('#toast');
@@ -228,7 +312,7 @@ $('#gen').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = '生成中…';
   try {
-    const res = await fetch(HUB + '/install/self', {
+    const res = await fetch(currentHub() + '/install/self', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: $('#name').value.trim(), capabilities: $('#caps').value.trim() }),
@@ -263,6 +347,111 @@ $('#gen').addEventListener('click', async () => {
 });
 
 $('#copymcp').onclick = () => copy($('#mcpcfg').textContent, 'MCP 配置已复制');
+
+// ---------------- Hub 地址：持久化 + 连通检查 ----------------
+(function initHub() {
+  const saved = localStorage.getItem(HUB_KEY);
+  if (saved) $('#hub').value = saved;
+  $('#hub').addEventListener('change', () => {
+    const v = normHub($('#hub').value);
+    if (!v) { $('#hub').value = DEFAULT_HUB; localStorage.removeItem(HUB_KEY); $('#hubstatus').textContent = '地址无效，已恢复默认。'; return; }
+    $('#hub').value = v;
+    localStorage.setItem(HUB_KEY, v);
+    $('#hubstatus').textContent = '已切换 Hub：' + v + '（点「检查连通」确认可用）';
+  });
+})();
+
+$('#hubcheck').addEventListener('click', async () => {
+  const btn = $('#hubcheck');
+  const st = $('#hubstatus');
+  const hub = currentHub();
+  btn.disabled = true;
+  st.textContent = '检查中… ' + hub;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 12000);
+    const res = await fetch(hub + '/healthz', { signal: ctl.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = await res.json();
+    // 顺带探测公开能力
+    let caps = [];
+    try {
+      const c2 = new AbortController();
+      setTimeout(() => c2.abort(), 12000);
+      const self = await fetch(hub + '/install/self', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'connectivity-probe' }), signal: c2.signal,
+      });
+      if (self.status === 201) caps.push('公开安装 ✓');
+      else if (self.status === 429) caps.push('公开安装 ✓（本 IP 已达限额）');
+      else if (self.status === 403) caps.push('公开安装已关闭');
+      else caps.push('公开安装 ' + self.status);
+    } catch { caps.push('公开安装不可达'); }
+    st.innerHTML = '✅ 连通 · ' + (j.service || 'kizuna-hub') + ' · ' + hub +
+      '<br><span style="opacity:.8">' + caps.join(' · ') + '</span>';
+  } catch (e) {
+    st.innerHTML = '❌ 连不上 ' + hub + '：' + (e.name === 'AbortError' ? '超时' : e.message) +
+      '<br><span style="opacity:.8">该 Hub 可能未开放 CORS（KIZUNA_CORS_ORIGINS 需包含 https://01men.github.io）或不在线。</span>';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------------- 零安装演示 ----------------
+$('#demorun').addEventListener('click', async () => {
+  const btn = $('#demorun');
+  const err = $('#demoerr');
+  const out = $('#demoout');
+  const box = $('#demosteps');
+  err.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = '运行中…';
+  box.innerHTML = '<p class="hint">正在投递、验签、写留痕…</p>';
+  out.classList.remove('hidden');
+  try {
+    const res = await fetch(currentHub() + '/demo/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: $('#demo-title').value.trim(), body: $('#demo-body').value.trim() }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.ok) throw new Error(j.error || ('HTTP ' + res.status));
+    const rows = j.steps.map((s) => {
+      const cls = s.ok ? 'ok' : 'bad';
+      return '<li class="' + cls + '"><strong>' + esc(s.step) + '</strong>' +
+        '<span class="mono" style="color:var(--dim);font-size:12px"> ' + esc(s.at.slice(11, 19)) + '</span>' +
+        '<div class="hint" style="font-size:13px">' + esc(s.detail) + '</div></li>';
+    }).join('');
+    box.innerHTML =
+      '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">' +
+        '<span class="badge ok">' + (j.steps.filter((s)=>s.ok).length) + '/' + j.steps.length + ' 步成功</span>' +
+        '<span class="badge info">' + j.elapsed_ms + 'ms</span>' +
+        '<span class="badge dim">' + esc(j.task_id) + '</span>' +
+      '</div>' +
+      '<ul class="timeline" style="padding-left:0;list-style:none;margin:0">' + rows + '</ul>' +
+      '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">' +
+        '<div class="hint" style="margin-bottom:6px">证据链（已真实写库）</div>' +
+        '<div class="grid3">' +
+          '<div class="card"><div class="k">留痕</div><div class="v mono" style="font-size:12.5px">' + esc(j.log_id) + '</div>' +
+            '<p>' + esc(j.proof.audit_log.outcome) + ' · 尝试 ' + j.proof.audit_log.attempt_count + ' 次</p></div>' +
+          '<div class="card"><div class="k">内容摘要</div><div class="v mono" style="font-size:12px">' + esc(String(j.proof.audit_log.content_digest).slice(0, 20)) + '…</div>' +
+            '<p>SHA-256，不存明文</p></div>' +
+          '<div class="card"><div class="k">结果三分类</div><div class="v" style="font-size:13px">' + esc(j.proof.results.map((r)=>r.category).join(' → ')) + '</div>' +
+            '<p>终态已自动回执</p></div>' +
+        '</div>' +
+        '<p class="hint" style="margin-top:12px;font-size:12.5px">' + esc(j.note) + '</p>' +
+      '</div>';
+  } catch (e) {
+    err.textContent = '演示失败：' + e.message;
+    err.classList.remove('hidden');
+    box.innerHTML = '';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '跑一遍真实链路';
+  }
+});
+
 $('#copycurl').onclick = () => copy($('#curl').textContent, 'curl 已复制');
 </script>
 </body>
