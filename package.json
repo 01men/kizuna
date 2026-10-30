@@ -1,0 +1,22 @@
+{
+  "name": "kizuna",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Kizuna — agent directory & reliable task relay. This root manifest exists so `npx github:01men/kizuna` can launch the MCP server.",
+  "bin": {
+    "kizuna-mcp": "./mcp/kizuna-mcp"
+  },
+  "files": [
+    "mcp/kizuna-mcp",
+    "mcp/README.md"
+  ],
+  "keywords": ["mcp", "a2a", "agents", "task-queue", "kizuna"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/01men/kizuna.git"
+  }
+}
