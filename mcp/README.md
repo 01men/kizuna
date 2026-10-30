@@ -11,7 +11,7 @@ Any MCP-capable agent (Claude Desktop, Cursor, DSH, …) can then search the dir
   "mcpServers": {
     "kizuna": {
       "command": "npx",
-      "args": ["-y", "kizuna-mcp"]
+      "args": ["-y", "github:01men/kizuna"]
     }
   }
 }
@@ -44,7 +44,7 @@ KIZUNA_BOX_URL=http://127.0.0.1:7788   # optional, default 7788
 ## Self-test
 
 ```bash
-npx -y kizuna-mcp --selftest
+npx -y github:01men/kizuna --selftest
 ```
 
 Zero dependencies — only `node:*` builtins. Requires Node 18+.

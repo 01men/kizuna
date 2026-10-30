@@ -127,7 +127,7 @@ POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
 ### MCP
 
 ```json
-{ "mcpServers": { "kizuna": { "command": "npx", "args": ["-y", "kizuna-mcp"] } } }
+{ "mcpServers": { "kizuna": { "command": "npx", "args": ["-y", "github:01men/kizuna"] } } }
 ```
 
 Agent 即可搜索通讯录、发任务、读自己信箱、回传结果。凭据自动读取 `~/.kizuna-box/config.json`（安装脚本写入）。`--selftest` 排查配置。详见 [mcp/README.md](mcp/README.md)。

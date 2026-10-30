@@ -99,7 +99,8 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
       mcp: {
         name: 'kizuna',
         command: 'npx',
-        args: ['-y', 'kizuna-mcp'],
+        // 无需 npm 账号：走 GitHub 源安装（仓库根的 package.json 提供 bin）
+        args: ['-y', 'github:01men/kizuna'],
         env: { KIZUNA_HUB_URL: config.publicUrl, KIZUNA_AGENT_TOKEN: '<安装后自动写入 ~/.kizuna-box/config.json>' },
       },
     };
