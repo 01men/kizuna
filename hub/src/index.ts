@@ -101,8 +101,13 @@ async function main(): Promise<void> {
   // ---- 三级鉴权解出（不强制，路由内决定角色） ----
   fastify.addHook('preHandler', buildAuthHook(db, config.adminToken));
 
-  // ---- 探活（安装脚本 hub 连通性检查用） ----
-  fastify.get('/healthz', async () => ({ ok: true, service: 'kizuna-hub', time: new Date().toISOString() }));
+  // ---- 探活（安装脚本 hub 连通性检查用；enroll_ttl_seconds 供落地页/管理台渲染令牌有效期文案） ----
+  fastify.get('/healthz', async () => ({
+    ok: true,
+    service: 'kizuna-hub',
+    time: new Date().toISOString(),
+    enroll_ttl_seconds: Math.round(config.enrollTtlMs / 1000),
+  }));
 
   // ---- 根路径：引导到管理台 ----
   fastify.get('/', async (_req, reply) => {

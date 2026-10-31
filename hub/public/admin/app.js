@@ -65,6 +65,17 @@ function fmtTime(iso) {
   return d.toLocaleString('zh-CN', { hour12: false });
 }
 
+/** 秒 → 自然语言（3 小时 / 1.5 小时 / 30 分钟），与 hub prompt.ts 的 humanTtl 同口径 */
+function humanTtl(sec) {
+  sec = Number(sec);
+  if (!Number.isFinite(sec) || sec <= 0) return '';
+  const ms = sec * 1000;
+  if (ms % 3600000 === 0) return `${ms / 3600000} 小时`;
+  if (ms > 3600000 && ms % 1800000 === 0) return `${ms / 3600000} 小时`;
+  if (ms % 60000 === 0) return `${ms / 60000} 分钟`;
+  return `${Math.round(sec)} 秒`;
+}
+
 function fmtIn(durMs) {
   if (durMs <= 0) return '现在';
   const s = Math.round(durMs / 1000);
@@ -770,7 +781,15 @@ async function renderInstall(main) {
       <tr><td><strong>鸿蒙</strong></td><td colspan="2">HarmonyOS NEXT 不开放第三方后台常驻运行时，v1 不提供脚本。替代路径：① 代理机模式——在同网段机器/云主机装 Kizuna Box，webhook 指向该机；② 等待 v2.0 ArkTS 原生 SDK；③ 具备开放终端环境的行业定制系统可按 Termux 方案尝试（不承诺）。</td><td><span class="badge warn">v1 边界</span></td></tr>
     </tbody></table>
   </div>
-  <p class="muted" style="margin-top:12px">使用方法：把生成的提示词原样贴给目标机器上的 Agent（DSH 会话、CLI Agent 均可），它会自动探测系统、下载并安装 Kizuna Box、注册并回填 webhook、配置自启，然后向你汇报自检结果。令牌一次性、3 小时内有效（脚本先注册再装运行时，装环境再慢也不会把令牌拖过期）。</p>`;
+  <p class="muted" style="margin-top:12px">使用方法：把生成的提示词原样贴给目标机器上的 Agent（DSH 会话、CLI Agent 均可），它会自动探测系统、下载并安装 Kizuna Box、注册并回填 webhook、配置自启，然后向你汇报自检结果。令牌一次性、<span id="in-ttl">3 小时</span>内有效（脚本先注册再装运行时，装环境再慢也不会把令牌拖过期）。</p>`;
+
+  // 有效期文案以服务端实时配置为准（KIZUNA_ENROLL_TTL_SECONDS 可调），避免硬编码漂移
+  try {
+    const hz = await fetch('/healthz').then((r) => r.json());
+    if (hz?.enroll_ttl_seconds && humanTtl(hz.enroll_ttl_seconds)) {
+      $('#in-ttl').textContent = humanTtl(hz.enroll_ttl_seconds);
+    }
+  } catch { /* 探活失败保留默认文案 */ }
 
   $('#in-gen').onclick = async () => {
     const name = $('#in-name').value.trim();
@@ -801,7 +820,9 @@ async function renderInstall(main) {
       };
       tick();
       installCountdown = setInterval(tick, 1000);
-      toast('安装提示词已生成（3 小时内有效）');
+      const ttlText = humanTtl(res.ttl_seconds);
+      if (ttlText) $('#in-ttl').textContent = ttlText;
+      toast(`安装提示词已生成（${ttlText || '3 小时'}内有效）`);
       $('#in-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) { toast(err.message, true); }
   };

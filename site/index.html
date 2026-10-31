@@ -184,7 +184,7 @@ ol.steps li { margin-bottom: 6px; }
     </div>
     <div class="actions">
       <button id="gen" class="btn primary" type="button">生成安装提示词</button>
-      <span class="hint">令牌一次性、3 小时内有效</span>
+      <span class="hint" id="ttlhint">令牌一次性、3 小时内有效</span>
     </div>
     <div id="out" class="out hidden">
       <div class="actions" style="margin-top:0;margin-bottom:10px">
@@ -279,6 +279,34 @@ function currentHub() {
   return v || DEFAULT_HUB;
 }
 
+/** 秒 → 自然语言（3 小时 / 1.5 小时 / 30 分钟），与 hub prompt.ts 的 humanTtl 同口径 */
+function humanTtl(sec) {
+  sec = Number(sec);
+  if (!Number.isFinite(sec) || sec <= 0) return '';
+  const ms = sec * 1000;
+  if (ms % 3600000 === 0) return (ms / 3600000) + ' 小时';
+  if (ms > 3600000 && ms % 1800000 === 0) return (ms / 3600000) + ' 小时';
+  if (ms % 60000 === 0) return (ms / 60000) + ' 分钟';
+  return Math.round(sec) + ' 秒';
+}
+
+function setTtlHint(sec) {
+  const t = humanTtl(sec);
+  if (t) $('#ttlhint').textContent = '令牌一次性、' + t + '内有效';
+}
+
+/** 用 Hub /healthz 返回的真实 TTL 校准角标，避免页面文案与服务端配置漂移 */
+async function refreshTtlHint() {
+  try {
+    const ctl = new AbortController();
+    const h = setTimeout(() => ctl.abort(), 8000);
+    const res = await fetch(currentHub() + '/healthz', { signal: ctl.signal });
+    clearTimeout(h);
+    const j = await res.json();
+    if (res.ok && j && j.enroll_ttl_seconds) setTtlHint(j.enroll_ttl_seconds);
+  } catch { /* 探活失败时保留现有文案 */ }
+}
+
 function toast(msg, bad) {
   const t = $('#toast');
   t.textContent = msg;
@@ -333,6 +361,7 @@ $('#gen').addEventListener('click', async () => {
       throw new Error(e.message || ('HTTP ' + res.status));
     }
     $('#prompt').textContent = body.install_prompt;
+    if (body.ttl_seconds) setTtlHint(body.ttl_seconds);
     $('#out').classList.remove('hidden');
     if (body.mcp) {
       $('#mcpcfg').textContent = JSON.stringify({ mcpServers: { kizuna: { command: body.mcp.command, args: body.mcp.args } } }, null, 2);
@@ -367,12 +396,14 @@ $('#copymcp').onclick = () => copy($('#mcpcfg').textContent, 'MCP 配置已复�
 (function initHub() {
   const saved = localStorage.getItem(HUB_KEY);
   if (saved) $('#hub').value = saved;
+  refreshTtlHint();
   $('#hub').addEventListener('change', () => {
     const v = normHub($('#hub').value);
-    if (!v) { $('#hub').value = DEFAULT_HUB; localStorage.removeItem(HUB_KEY); $('#hubstatus').textContent = '地址无效，已恢复默认。'; return; }
+    if (!v) { $('#hub').value = DEFAULT_HUB; localStorage.removeItem(HUB_KEY); $('#hubstatus').textContent = '地址无效，已恢复默认。'; refreshTtlHint(); return; }
     $('#hub').value = v;
     localStorage.setItem(HUB_KEY, v);
     $('#hubstatus').textContent = '已切换 Hub：' + v + '（点「检查连通」确认可用）';
+    refreshTtlHint();
   });
 })();
 
