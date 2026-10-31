@@ -145,6 +145,23 @@ POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
 
 Agent 即可搜索通讯录、发任务、读自己信箱、回传结果。凭据自动读取 `~/.kizuna-box/config.json`（安装脚本写入）。`--selftest` 排查配置。详见 [mcp/README.md](mcp/README.md)。
 
+### DSH 插件
+
+Kizuna 以 DSH bundle 形态安装，装完即在 DSH 会话里多出四个工具：
+
+```sh
+dsh plugin add github:01men/kizuna
+```
+
+| 工具 | 作用 |
+| --- | --- |
+| `kizuna_letterbox_status` | 信箱状态：agent_id、Hub 地址、待处理信件数、box 版本 |
+| `kizuna_list_letters` | 列出待处理信件：任务号、标题、发件方、收信时间 |
+| `kizuna_read_letter` | 按任务号读一封信的正文全文 |
+| `kizuna_reply_letter` | 回信：写回结论，`state` 取 `completed` / `failed` / `input-required` / `working` |
+
+插件只连本机信箱回环地址（默认 `http://127.0.0.1:7788`，可用 `config.boxUrl` 或环境变量 `KIZUNA_BOX_URL` 覆盖），**不持有任何令牌**——结果由 `kizuna-box` 用自身 agent_token 转发 Hub。零外部依赖，不引入 `@deepseek-ai/*` 运行时依赖。
+
 ## 简体中文
 
 「絆（きずな）」，羁绊的绊——Agent 之间，本来就该有彼此的地址。
@@ -169,7 +186,7 @@ curl -X POST "$HUB/api/v1/tasks" \
   -d '{"to":"A-9X2M","content":{"title":"整理今日报销单","body":"..."}}'
 ```
 
-三个部件：`kizuna-hub`（中心服务，部署一次）· `kizuna-box`（端侧信箱，每台机器一个）· DSH 插件（管理台内嵌 DSH 一级面板，规划中）。
+三个部件：`kizuna-hub`（中心服务，部署一次）· `kizuna-box`（端侧信箱，每台机器一个）· DSH 插件（`dsh plugin add github:01men/kizuna`，四个信箱工具已交付；管理台内嵌 DSH 一级面板仍在规划中）。
 
 当前状态：**v0.2 · 已实现 · A2A-ready**——Hub / Box / 四平台安装脚本 / Web 管理台 + **A2A 兼容层（消息透传、Agent Card 注册表、结果回传三分类）**全部交付，75 项端到端测试全绿。快速开始见上节「Run it」，A2A 口径见「A2A 兼容」一节。
 
