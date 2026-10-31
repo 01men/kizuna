@@ -1,7 +1,9 @@
 # Kizuna Box — Windows 一键安装脚本（由 Hub 下发，HUB 与 TOKEN 已内嵌）
-# 流程：安装运行时（如缺失，winget）→ 下载服务 → 注册 → WinSW 托管的 Windows 服务
+# 流程：注册（先用令牌换正式凭据并落盘）→ 安装运行时（如缺失，winget）→ 下载服务
+#       → 写入 config → WinSW 托管的 Windows 服务
 #       （无管理员权限时退化为计划任务：登录自启 + 失败重启）→ 自检
-# 升级：重跑本脚本即同路径覆盖 bin，保留 spool 与 config。
+# 注册排在最前：令牌是一次性资源，后面的装运行时/下载再慢也不会把它拖过期。
+# 升级/续装：重跑本脚本即同路径覆盖 bin，保留 spool 与 config；已注册则跳过注册。
 $ErrorActionPreference = 'Stop'
 
 $HUB   = '__KIZUNA_HUB__'
@@ -19,43 +21,26 @@ if ($IsAdmin) {
 }
 $BinDir     = Join-Path $Root 'bin'
 $ConfigPath = Join-Path $ConfigDir 'config.json'
+$EnrollPath = Join-Path $ConfigDir 'enroll.json'
 $BoxPath    = Join-Path $BinDir 'kizuna-box'
 
 function Say($m)  { Write-Host "[kizuna-box] $m" }
 function Fail($m) { Write-Host "[kizuna-box][ERROR] $m" -ForegroundColor Red; exit 1 }
 
-# ---------- 1. 运行时：Node.js >= 18 ----------
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) {
-  Say '未检测到 Node.js，尝试 winget 安装 OpenJS.NodeJS.LTS ...'
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent | Out-Null
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-    $node = Get-Command node -ErrorAction SilentlyContinue
-  }
-}
-if (-not $node) {
-  Fail "未找到 Node.js 且 winget 不可用。请手动安装 Node.js 20（https://nodejs.org/）后重跑本脚本"
-}
-$nodeVersion = (& node -p 'process.versions.node').Split('.')[0]
-if ([int]$nodeVersion -lt 18) { Fail "Node.js 版本过低（$(& node --version)），需要 >= 18" }
-Say "Node.js 就绪: $(& node --version)"
-
-# ---------- 2. 下载服务 ----------
 New-Item -ItemType Directory -Force -Path $BinDir, $ConfigDir | Out-Null
-Invoke-WebRequest -UseBasicParsing -Uri "$HUB/install/box.js" -OutFile $BoxPath
-Say "服务已下载: $BoxPath"
 
-# ---------- 3. 注册（升级模式跳过） ----------
-$needEnroll = $true
+# ---------- 1. 注册（已注册则跳过） ----------
+$haveConfig = $false
 if (Test-Path $ConfigPath) {
   try {
     $prev = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-    if ($prev.agent_id -and $prev.agent_token -and $prev.endpoint_secret) { $needEnroll = $false }
+    if ($prev.agent_id -and $prev.agent_token -and $prev.endpoint_secret) { $haveConfig = $true }
   } catch { }
 }
-if (-not $needEnroll) {
-  Say '检测到已有配置，升级模式：保留 config 与 spool'
+if ($haveConfig) {
+  Say '检测到已有配置：跳过注册，保留 config 与 spool'
+} elseif ((Test-Path $EnrollPath) -and ((Get-Item $EnrollPath).Length -gt 0)) {
+  Say '检测到上次注册凭据：跳过注册，继续安装'
 } else {
   # 探测局域网 IPv4
   $lanIp = '127.0.0.1'
@@ -68,25 +53,94 @@ if (-not $needEnroll) {
   $webhook = "http://${lanIp}:7788"
   Say "注册到 Hub（webhook=$webhook）..."
   $payload = @{ token = $TOKEN; webhook_url = $webhook } | ConvertTo-Json
-  try {
-    $cred = Invoke-RestMethod -Method Post -Uri "$HUB/api/v1/enroll" -ContentType 'application/json' -Body $payload
-  } catch {
-    Fail "注册失败: $($_.Exception.Message)"
+  $cred = $null
+  for ($i = 1; $i -le 3; $i++) {
+    try {
+      $cred = Invoke-RestMethod -Method Post -Uri "$HUB/api/v1/enroll" -ContentType 'application/json' -Body $payload -TimeoutSec 60
+      break
+    } catch {
+      $msg = $_.Exception.Message
+      # 410 的响应体在 ErrorDetails 里，不在异常消息中
+      $detail = ''
+      if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
+      $all = "$msg $detail"
+      if ($all -match 'ENROLL_TOKEN_EXPIRED') {
+        Fail '注册令牌已过期（HTTP 410）。请在管理台重新生成安装提示词，用新提示词重跑；本机已有部分安装文件，重跑会复用。'
+      }
+      if ($all -match 'ENROLL_TOKEN_USED') {
+        Fail '注册令牌已被使用（HTTP 410）。若本机已装好，直接重跑即可；否则请重新生成安装提示词。'
+      }
+      if ($all -match '\b410\b' -or $all -match 'ENROLL_TOKEN') {
+        Fail "注册失败: $msg $detail"
+      }
+      if ($i -eq 3) {
+        Fail "无法连接 Hub（$HUB）: $msg。请检查网络/代理后重跑本脚本；令牌在有效期内仍可用。"
+      }
+      $wait = $i * 3
+      Say "注册请求连接失败（第 $i/3 次），${wait}s 后重试..."
+      Start-Sleep -Seconds $wait
+    }
   }
+  if (-not $cred) { Fail "注册失败：未取得凭据（Hub: $HUB）" }
+  $cred | ConvertTo-Json -Depth 4 | Out-File -FilePath $EnrollPath -Encoding utf8
+  Say "注册成功：凭据已暂存（完成后写入 config.json）"
+}
+
+# ---------- 2. 运行时：Node.js >= 18 ----------
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $node) {
+  Say '未检测到 Node.js，尝试 winget 安装 OpenJS.NodeJS.LTS ...'
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --silent | Out-Null
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+    $node = Get-Command node -ErrorAction SilentlyContinue
+  }
+}
+if (-not $node) {
+  Fail "未找到 Node.js 且 winget 不可用。请手动安装 Node.js 20（https://nodejs.org/）后重跑本脚本（注册已完成，不会重复消耗令牌）"
+}
+$nodeVersion = (& node -p 'process.versions.node').Split('.')[0]
+if ([int]$nodeVersion -lt 18) { Fail "Node.js 版本过低（$(& node --version)），需要 >= 18（注册已完成，升级后重跑即可续装）" }
+Say "Node.js 就绪: $(& node --version)"
+
+# ---------- 3. 下载服务（失败重试） ----------
+$boxOk = $false
+for ($i = 1; $i -le 5; $i++) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri "$HUB/install/box.js" -OutFile $BoxPath -TimeoutSec 300
+    $boxOk = $true
+    break
+  } catch {
+    if ($i -eq 5) { break }
+    $wait = $i * 3
+    Say "下载服务失败（第 $i/5 次），${wait}s 后重试..."
+    Start-Sleep -Seconds $wait
+  }
+}
+if (-not $boxOk) { Fail "服务下载失败（Hub: $HUB）。网络恢复后重跑本脚本即可续装，凭据已保存不会重复消耗令牌。" }
+Say "服务已下载: $BoxPath"
+
+# ---------- 4. 写入端侧配置 ----------
+if ($haveConfig) {
+  Say '升级模式：保留现有 config'
+} else {
+  if (-not (Test-Path $EnrollPath)) { Fail "缺少注册凭据（$EnrollPath），请重新生成安装提示词后重跑" }
+  $cred = Get-Content $EnrollPath -Raw | ConvertFrom-Json
   $cfg = [ordered]@{
     hub_url         = $HUB
     agent_id        = $cred.agent_id
     agent_token     = $cred.agent_token
     endpoint_secret = $cred.endpoint_secret
-    webhook_url     = if ($cred.webhook_url) { $cred.webhook_url } else { $webhook }
+    webhook_url     = $cred.webhook_url
     listen          = @{ host = '0.0.0.0'; port = 7788 }
     heartbeat_interval_s = 60
   }
   $cfg | ConvertTo-Json -Depth 4 | Out-File -FilePath $ConfigPath -Encoding utf8
-  Say "注册成功: agent_id=$($cred.agent_id)"
+  Remove-Item $EnrollPath -ErrorAction SilentlyContinue
+  Say "凭据已写入: $ConfigPath (agent_id=$($cred.agent_id))"
 }
 
-# ---------- 4. 开机自启 + 崩溃拉起 ----------
+# ---------- 5. 开机自启 + 崩溃拉起 ----------
 if ($IsAdmin) {
   # WinSW 托管的 Windows 服务（服务身份自启，无需登录；onfailure 自动重启）
   $SvcExe = Join-Path $BinDir 'kizuna-box-service.exe'
@@ -124,7 +178,7 @@ if ($IsAdmin) {
   Say '计划任务已注册并启动: KizunaBox（登录自启 + 失败重启）'
 }
 
-# ---------- 5. 自检 ----------
+# ---------- 6. 自检 ----------
 Start-Sleep -Seconds 3
 Say '===== 自检报告 ====='
 try {

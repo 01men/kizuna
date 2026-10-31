@@ -8,6 +8,7 @@ import { newEnrollToken } from '../ids.js';
 import { createAgent } from '../agentService.js';
 import { renderPrompt, renderScript } from '../prompt.js';
 import { enforcePublicQuota } from '../quota.js';
+import { DEFAULT_ENROLL_TTL_MS } from '../config.js';
 
 interface EnrollRow {
   token: string;
@@ -17,7 +18,7 @@ interface EnrollRow {
   used_at: string | null;
 }
 
-export const ENROLL_TTL_MS = 10 * 60 * 1000;
+export const ENROLL_TTL_MS = DEFAULT_ENROLL_TTL_MS;
 
 /** 校验一次性令牌（不消费）。view/prompt 等只读场景用 */
 function peekToken(db: RouteCtx['db'], token: string): EnrollRow {
@@ -50,6 +51,7 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
     }
     const now = new Date();
     const token = newEnrollToken();
+    const expiresAt = new Date(now.getTime() + config.enrollTtlMs).toISOString();
     const draft = JSON.stringify({
       agent_id: body.agent_id,
       name: body.name,
@@ -61,20 +63,20 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
       token,
       draft,
       now.toISOString(),
-      new Date(now.getTime() + ENROLL_TTL_MS).toISOString(),
+      expiresAt,
     );
     fastify.log.info({ enroll_issued: true }, 'enroll token issued');
     reply.code(201);
     return {
       token,
-      expires_at: new Date(now.getTime() + ENROLL_TTL_MS).toISOString(),
-      ttl_seconds: ENROLL_TTL_MS / 1000,
-      install_prompt: renderPrompt(config.publicUrl, token),
+      expires_at: expiresAt,
+      ttl_seconds: config.enrollTtlMs / 1000,
+      install_prompt: renderPrompt(config.publicUrl, token, config.enrollTtlMs),
     };
   });
 
   // ---------- 公开安装（社区落地页：免登录拿一句话提示词） ----------
-  // 安全：每 IP 每小时限额、令牌仍是一次性 10 分钟、名称/能力裁剪长度；
+  // 安全：每 IP 每分钟限额、令牌仍是一次性且默认 3 小时有效、名称/能力裁剪长度；
   //      全局总开关 KIZUNA_PUBLIC_INSTALL=false 可随时关闭。
   fastify.post('/install/self', async (req, reply) => {
     if (!config.publicInstall) throw new AppError(403, 'PUBLIC_INSTALL_DISABLED', '本 Hub 未开放公开安装');
@@ -86,20 +88,21 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
     const capabilities = typeof body.capabilities === 'string' ? body.capabilities.trim().slice(0, 300) : '';
     const now = new Date();
     const token = newEnrollToken();
+    const expiresAt = new Date(now.getTime() + config.enrollTtlMs).toISOString();
     db.prepare('INSERT INTO enroll_tokens (token, agent_draft, created_at, expires_at) VALUES (?, ?, ?, ?)').run(
       token,
       JSON.stringify({ name: name || '社区 Agent', capabilities, capability_tags: [] }),
       now.toISOString(),
-      new Date(now.getTime() + ENROLL_TTL_MS).toISOString(),
+      expiresAt,
     );
     fastify.log.info({ via: 'public-install', ip: clientKey(req) }, 'public enroll token issued');
     reply.code(201);
     return {
       token,
-      expires_at: new Date(now.getTime() + ENROLL_TTL_MS).toISOString(),
-      ttl_seconds: ENROLL_TTL_MS / 1000,
+      expires_at: expiresAt,
+      ttl_seconds: config.enrollTtlMs / 1000,
       hub_url: config.publicUrl,
-      install_prompt: renderPrompt(config.publicUrl, token),
+      install_prompt: renderPrompt(config.publicUrl, token, config.enrollTtlMs),
       quota: {
         limit_per_minute: settings.public_install_per_minute,
         allowlisted: isAllowlisted(peer, settings.rate_limit_allowlist),
@@ -122,7 +125,7 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
     rateLimit(`install:${clientKey(req)}`, 120);
     peekToken(db, token);
     reply.type('text/plain; charset=utf-8');
-    return renderPrompt(config.publicUrl, token);
+    return renderPrompt(config.publicUrl, token, config.enrollTtlMs);
   });
 
   // ---------- 平台一键脚本（脚本内嵌 HUB + 令牌） ----------

@@ -126,7 +126,7 @@ CREATE TABLE audit_logs (
 );
 CREATE INDEX idx_audit_outcome ON audit_logs(outcome, dequeued_at);
 
--- 一次性注册令牌（安装提示词携带，10 分钟有效、用后作废）
+-- 一次性注册令牌（安装提示词携带，3 小时有效、用后作废）
 CREATE TABLE enroll_tokens (
   token      TEXT PRIMARY KEY,
   agent_draft TEXT NOT NULL,                 -- 预填的编号/名称/能力声明
@@ -267,7 +267,7 @@ sequenceDiagram
 - **三级令牌**：
   - 管理员令牌（Admin Token）：管理 API 全量权限，Web 管理台/DSH 插件 Host 半边持有；
   - Agent 令牌（Agent Token）：该 Agent 提交任务包、心跳、查询自己的任务；
-  - 一次性注册令牌（Enroll Token）：安装提示词携带，10 分钟有效、用后作废，换取正式 Agent Token。
+  - 一次性注册令牌（Enroll Token）：安装提示词携带，3 小时有效、用后作废，换取正式 Agent Token。
 - **投递签名**：Hub → 端侧带 `X-Kizuna-Timestamp` 与 `X-Kizuna-Signature: sha256=HMAC(endpoint_secret, timestamp + '.' + rawBody)`；端侧校验时间窗 ±300s 防重放（算法与示例代码见 03 §6）。
 - **端侧端口分离**：交付端口（收 Hub 投递，必须验签）与本地 API（127.0.0.1 回环，供本机 Agent 读取）分端口监听。
 - **传输**：生产环境 Hub 与 webhook 全链路 HTTPS；Hub 强制管理员登录（令牌）。

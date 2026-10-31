@@ -66,6 +66,14 @@ Or with Docker (TLS via Caddy profile):
 KIZUNA_PUBLIC_URL=https://hub.example.com KIZUNA_ADMIN_TOKEN=change-me docker compose --profile tls up -d
 ```
 
+一次性注册令牌默认 **3 小时**有效（覆盖装 Node、下载服务等前置步骤）。要调整：
+
+```bash
+KIZUNA_ENROLL_TTL_SECONDS=10800   # 秒；默认 10800（3 小时）
+```
+
+安装脚本把**注册放在最前面**，装运行时/下载服务再慢也不会把令牌拖过期；中断后重跑同一条命令即可续装（已注册会跳过注册并保留凭据）。
+
 End-to-end tests (real hub + real kizuna-box):
 
 ```bash
@@ -123,7 +131,7 @@ POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
 → 201 {"token":"et_…", "expires_at","install_prompt","mcp":{…}}
 ```
 
-安全约束：每人每分钟限额 **10 次**（公开安装与演示各自计算，管理台可调）；令牌仍是一次性、10 分钟；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
+安全约束：每人每分钟限额 **10 次**（公开安装与演示各自计算，管理台可调）；令牌仍是一次性、3 小时（`KIZUNA_ENROLL_TTL_SECONDS` 可调）；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
 
 - **超限怎么办**：落地页会显示等待秒数与提额入口 → 见 [QUOTA.md](QUOTA.md)（在仓库提 issue 留下用途/出口 IP/联系方式）
 - **服务端白名单**：管理台「设置」页维护 IP/CIDR，命中后**完全豁免限流**（供社区机器人、官方巡检、自有固定出口）

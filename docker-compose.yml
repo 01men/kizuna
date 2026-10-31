@@ -16,6 +16,8 @@ services:
       KIZUNA_ADMIN_TOKEN: ${KIZUNA_ADMIN_TOKEN:-}
       # 安装提示词/脚本内嵌的对外地址（端侧必须可达）
       KIZUNA_PUBLIC_URL: ${KIZUNA_PUBLIC_URL:-http://localhost:7700}
+      # 一次性注册令牌有效期（秒）。默认 10800 = 3 小时，覆盖装 Node/下载服务等前置步骤
+      KIZUNA_ENROLL_TTL_SECONDS: ${KIZUNA_ENROLL_TTL_SECONDS:-10800}
     restart: unless-stopped
 
   # 可选：Caddy 反代终止 TLS（生产建议）。启用：docker compose --profile tls up -d

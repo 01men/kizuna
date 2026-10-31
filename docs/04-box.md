@@ -38,17 +38,18 @@ Kizuna Box 是**本产品官方提供的端侧常驻服务**——Agent-B 的「
 ```text
 请把本机接入 Kizuna · Agent 通讯录，安装并部署端侧服务 Kizuna Box。严格按步骤执行：
 1. 探测当前系统（Linux / macOS / Windows / Android-Termux / 其他）。「其他」一律终止并说明原因。
-2. 用对应平台的一键脚本安装（HUB={{HUB_URL}}，ENROLL_TOKEN={{ENROLL_TOKEN}}，令牌一次性、10分钟内有效，请立即执行）：
+2. 用对应平台的一键脚本安装（HUB={{HUB_URL}}，ENROLL_TOKEN={{ENROLL_TOKEN}}，令牌一次性、3 小时内有效）：
    - Linux:   curl -fsSL "{{HUB_URL}}/install/linux.sh?token={{ENROLL_TOKEN}}" | bash
    - macOS:   curl -fsSL "{{HUB_URL}}/install/macos.sh?token={{ENROLL_TOKEN}}" | bash
    - Windows: powershell -c "irm '{{HUB_URL}}/install/windows.ps1?token={{ENROLL_TOKEN}}' | iex"
    - Termux:  curl -fsSL "{{HUB_URL}}/install/termux.sh?token={{ENROLL_TOKEN}}" | bash
-   脚本会自动：安装运行时（如缺失）→ 下载服务 → 用令牌完成注册（换取正式凭据、回填 webhook）→
-   配置开机自启 → 启动服务。
+   脚本自动完成：注册（先换取正式凭据并落盘）→ 安装运行时（如缺失）→ 下载服务 → 配置开机自启 → 启动。
+   注册排在最前，因此后续步骤慢或中断都不会浪费令牌；重跑同一条命令即可续装（已注册会跳过注册、保留凭据）。
 3. 自检：请求 http://127.0.0.1:7788/healthz，确认 ok=true 且 agent_id 非空；
    再确认本机 Agent 可用 GET /tasks/pending 读到信箱。
 4. 汇报：系统类型、agent_id、webhook 地址、自启方式（服务名/单元名）、自检结果。
    任何一步失败：给出失败原因、已执行的命令与修复建议，不要静默重试超过 3 次。
+   若报 HTTP 410 ENROLL_TOKEN_EXPIRED：令牌已过期，请让管理员在管理台重新生成安装提示词，不要重复执行旧命令。
 ```
 
 **执行链路**：
@@ -63,14 +64,14 @@ sequenceDiagram
     U->>A: 粘贴安装提示词
     A->>H: GET /install/{platform}.sh?token=一次性令牌
     H-->>A: 安装脚本（已嵌入 HUB 与令牌）
-    A->>A: 执行脚本（装运行时/服务/自启）
-    E->>H: POST /api/v1/enroll（令牌换正式凭据，回填 webhook）
-    H-->>E: agent_token / endpoint_secret（令牌作废）
+    A->>H: POST /api/v1/enroll（令牌换正式凭据，回填 webhook）
+    H-->>A: agent_token / endpoint_secret（令牌作废）
+    A->>A: 写 config → 装运行时/下载服务/配自启
     A->>E: GET /healthz 自检
     A->>U: 汇报：agent_id、webhook、自启方式、自检结果
 ```
 
-安全要点：enroll 令牌一次性、10 分钟过期；换取的正式凭据只写入端侧 `config.json`（权限 600），不回显给 Agent 汇报内容。
+安全要点：enroll 令牌一次性、3 小时过期；换取的正式凭据只写入端侧 `config.json`（权限 600），不回显给 Agent 汇报内容。
 
 ## 4. 平台安装脚本与开机自启配置
 

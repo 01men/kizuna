@@ -770,7 +770,7 @@ async function renderInstall(main) {
       <tr><td><strong>鸿蒙</strong></td><td colspan="2">HarmonyOS NEXT 不开放第三方后台常驻运行时，v1 不提供脚本。替代路径：① 代理机模式——在同网段机器/云主机装 Kizuna Box，webhook 指向该机；② 等待 v2.0 ArkTS 原生 SDK；③ 具备开放终端环境的行业定制系统可按 Termux 方案尝试（不承诺）。</td><td><span class="badge warn">v1 边界</span></td></tr>
     </tbody></table>
   </div>
-  <p class="muted" style="margin-top:12px">使用方法：把生成的提示词原样贴给目标机器上的 Agent（DSH 会话、CLI Agent 均可），它会自动探测系统、下载并安装 Kizuna Box、注册并回填 webhook、配置自启，然后向你汇报自检结果。令牌一次性、10 分钟有效。</p>`;
+  <p class="muted" style="margin-top:12px">使用方法：把生成的提示词原样贴给目标机器上的 Agent（DSH 会话、CLI Agent 均可），它会自动探测系统、下载并安装 Kizuna Box、注册并回填 webhook、配置自启，然后向你汇报自检结果。令牌一次性、3 小时内有效（脚本先注册再装运行时，装环境再慢也不会把令牌拖过期）。</p>`;
 
   $('#in-gen').onclick = async () => {
     const name = $('#in-name').value.trim();
@@ -791,13 +791,17 @@ async function renderInstall(main) {
       clearInterval(installCountdown);
       const tick = () => {
         const left = Math.max(0, new Date(res.expires_at).getTime() - Date.now());
-        const mm = String(Math.floor(left / 60000)).padStart(2, '0');
-        const ss = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
-        $('#in-countdown').textContent = left > 0 ? `令牌剩余 ${mm}:${ss}` : '令牌已过期，请重新生成';
+        const total = Math.floor(left / 1000);
+        const hh = Math.floor(total / 3600);
+        const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+        const ss = String(total % 60).padStart(2, '0');
+        $('#in-countdown').textContent = left > 0
+          ? `令牌剩余 ${hh > 0 ? `${hh}:` : ''}${mm}:${ss}`
+          : '令牌已过期，请重新生成';
       };
       tick();
       installCountdown = setInterval(tick, 1000);
-      toast('安装提示词已生成（10 分钟内有效）');
+      toast('安装提示词已生成（3 小时内有效）');
       $('#in-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) { toast(err.message, true); }
   };

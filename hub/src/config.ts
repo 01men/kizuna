@@ -20,7 +20,12 @@ export interface HubConfig {
   corsOrigins: string[];
   /** 公开端点（安装/演示）每 IP 每分钟限额；0 表示用设置页的值 */
   publicInstallQuota: number;
+  /** 一次性注册令牌有效期（毫秒）。含装运行时与下载服务的耗时，默认 3 小时 */
+  enrollTtlMs: number;
 }
+
+/** 默认令牌有效期 3 小时：覆盖 Homebrew 装 Node、下载 box.js 等前置步骤 */
+export const DEFAULT_ENROLL_TTL_MS = 3 * 60 * 60 * 1000;
 
 function resolveBoxSource(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,5 +77,10 @@ export function loadConfig(): HubConfig {
       .map((s) => s.trim())
       .filter(Boolean),
     publicInstallQuota: Math.max(0, Number(process.env.KIZUNA_PUBLIC_INSTALL_QUOTA ?? 0)),
+    enrollTtlMs: (() => {
+      const sec = Number(process.env.KIZUNA_ENROLL_TTL_SECONDS);
+      if (!Number.isFinite(sec) || sec <= 0) return DEFAULT_ENROLL_TTL_MS;
+      return Math.floor(sec) * 1000;
+    })(),
   };
 }

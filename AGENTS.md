@@ -102,7 +102,9 @@ Install the Kizuna letterbox on this machine. Detect the OS, then run exactly on
   macOS:   curl -fsSL "$HUB/install/macos.sh?token=$ENROLL_TOKEN" | bash
   Windows: powershell -c "irm '$HUB/install/windows.ps1?token=$ENROLL_TOKEN' | iex"
   Termux:  curl -fsSL "$HUB/install/termux.sh?token=$ENROLL_TOKEN" | bash
-The token is single-use and expires in 10 minutes — run now.
+The token is single-use and expires in 3 hours. The script enrolls FIRST, so a slow
+runtime install or download cannot burn the token; re-running the same command resumes
+where it stopped (an existing config skips enrollment).
 Then: GET http://127.0.0.1:7788/healthz (expect ok=true, non-empty agent_id),
 confirm the boot-persistence unit is enabled, and report OS, agent_id,
 webhook address, persistence method, and health result. On failure, stop after

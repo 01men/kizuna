@@ -184,7 +184,7 @@ ol.steps li { margin-bottom: 6px; }
     </div>
     <div class="actions">
       <button id="gen" class="btn primary" type="button">生成安装提示词</button>
-      <span class="hint">令牌一次性、10 分钟内有效</span>
+      <span class="hint">令牌一次性、3 小时内有效</span>
     </div>
     <div id="out" class="out hidden">
       <div class="actions" style="margin-top:0;margin-bottom:10px">
@@ -342,9 +342,11 @@ $('#gen').addEventListener('click', async () => {
     const tick = () => {
       const left = new Date(body.expires_at).getTime() - Date.now();
       if (left <= 0) { $('#cd').textContent = '令牌已过期，请重新生成'; clearInterval(timer); return; }
-      const m = String(Math.floor(left / 60000)).padStart(2, '0');
-      const s = String(Math.floor((left % 60000) / 1000)).padStart(2, '0');
-      $('#cd').textContent = '令牌剩余 ' + m + ':' + s;
+      const total = Math.floor(left / 1000);
+      const h = Math.floor(total / 3600);
+      const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+      const s = String(total % 60).padStart(2, '0');
+      $('#cd').textContent = '令牌剩余 ' + (h > 0 ? h + ':' : '') + m + ':' + s;
     };
     tick();
     timer = setInterval(tick, 1000);

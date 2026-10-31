@@ -160,7 +160,7 @@ X-Kizuna-Attempt: 2
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `POST /api/v1/enroll-tokens` | Admin | 为预填的 Agent 信息签发一次性令牌（默认 10 分钟有效） |
+| `POST /api/v1/enroll-tokens` | Admin | 为预填的 Agent 信息签发一次性令牌（默认 3 小时有效，`KIZUNA_ENROLL_TTL_SECONDS` 可调） |
 | `GET /install/prompt?token=` | Enroll | 返回**安装提示词**文本（占位符已自动填充，见 04 §3） |
 | `GET /install/linux.sh?token=` | Enroll | Linux 一键安装脚本 |
 | `GET /install/macos.sh?token=` | Enroll | macOS 一键安装脚本 |
