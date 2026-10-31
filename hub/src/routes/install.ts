@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
+import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 import type { RouteCtx } from '../ctx.js';
 import { AppError, err } from '../errors.js';
 import { requireAdmin, rateLimit, clientKey, isAllowlisted } from '../auth.js';
@@ -9,6 +11,10 @@ import { createAgent } from '../agentService.js';
 import { renderPrompt, renderScript } from '../prompt.js';
 import { enforcePublicQuota } from '../quota.js';
 import { DEFAULT_ENROLL_TTL_MS } from '../config.js';
+
+const gzipAsync = promisify(zlib.gzip);
+/** box 源码不常变，压缩结果进程内缓存，避免每次请求重复压缩 */
+let boxGzipCache: Buffer | null = null;
 
 interface EnrollRow {
   token: string;
@@ -150,13 +156,23 @@ export default async function installRoutes(fastify: FastifyInstance, ctx: Route
   }
 
   // ---------- kizuna-box 单文件源码下发 ----------
-  fastify.get('/install/box.js', async (_req, reply) => {
+  // 支持 gzip：21 KB → 7 KB。安装脚本用 curl -fsSL（默认附带 Accept-Encoding），
+  // 弱网下传输量降到三分之一，显著降低中途断流的概率。
+  fastify.get('/install/box.js', async (req, reply) => {
     if (!fs.existsSync(ctx.config.boxSourcePath)) {
       throw err.internal('kizuna-box 源码文件缺失（KIZUNA_BOX_FILE 或仓库 box/kizuna-box）');
     }
     reply.type('text/javascript; charset=utf-8');
     reply.header('cache-control', 'no-store');
-    return fs.createReadStream(ctx.config.boxSourcePath);
+    reply.header('vary', 'accept-encoding');
+
+    const source = await fs.promises.readFile(ctx.config.boxSourcePath);
+    const acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''));
+    if (!acceptsGzip) return source;
+
+    if (!boxGzipCache) boxGzipCache = await gzipAsync(source);
+    reply.header('content-encoding', 'gzip');
+    return boxGzipCache;
   });
 
   // ---------- 注册（安装脚本回调）：令牌换正式凭据，令牌即作废 ----------
