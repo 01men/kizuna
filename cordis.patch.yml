@@ -1,0 +1,15 @@
+# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/kizuna）。
+#
+# 形态说明：
+# - name 用「包名 + 子路径」模块说明符：Node 从 profile 目录出发沿 node_modules 解析
+#   （本包被安装在 <profile>/node_modules/kizuna），无需感知安装位置，开箱可解析。
+# - 本插件只提供模型可见工具（读本机信箱 / 回信），不启前端面板，因此不声明 dsh.client。
+# - 插件零外部依赖：工具定义按 DSH 原生 ToolRuntime 契约手写，不 import @deepseek-ai/*
+#   （npm 上 dsh-tools 版本与 profile 内置版本不一致，声明依赖会拉错版本）。
+# - 信箱地址默认本机回环 http://127.0.0.1:7788；可用 config.boxUrl 或环境变量
+#   KIZUNA_BOX_URL 覆盖。插件不持有任何令牌，Hub 回传由 box 用自身 agent_token 转发。
+- insert:
+    - id: kizuna-letterbox
+      name: kizuna/dsh-plugin/index.mjs
+      config:
+        boxUrl: http://127.0.0.1:7788
