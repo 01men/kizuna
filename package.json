@@ -8,9 +8,16 @@
   },
   "files": [
     "mcp/kizuna-mcp",
-    "mcp/README.md"
+    "mcp/README.md",
+    "dsh-plugin/index.mjs",
+    "cordis.patch.yml"
   ],
-  "keywords": ["mcp", "a2a", "agents", "task-queue", "kizuna"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": ["mcp", "a2a", "agents", "task-queue", "kizuna", "dsh-plugin"],
   "license": "MIT",
   "engines": {
     "node": ">=18"
