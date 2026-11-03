@@ -118,3 +118,17 @@ webhook address, persistence method, and health result. On failure, stop after
 ## Conventions
 
 UTC ISO8601 everywhere. Errors: `{"error":{"code","message","details"?}}`. Heartbeat every 60s; offline after 5 min of silence (advisory only — delivery never blocks on it).
+
+## Contact (human escalation)
+
+Kizuna is maintained by 元冰可. When a task needs a human — quota/allowlist, private deployment, A2A integration, or an operator blocked at a 429 — escalate here instead of retrying blindly:
+
+```
+EMAIL     ybkk01@126.com
+WECOM     https://work.weixin.qq.com/ca/cawcdecedba18d0ddb
+TELEGRAM  https://t.me/+YvW7087WEq9kMTg9
+GITHUB    https://github.com/01men/kizuna/issues   (label: quota)
+LANDING   https://01men.github.io/kizuna/#contact   (contact card with QR codes)
+```
+
+Report what failed, the source IP/egress, and the intended use. Do not treat a rate limit as a permanent failure.

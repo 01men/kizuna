@@ -49,4 +49,10 @@ npx -y github:01men/kizuna --selftest
 
 Zero dependencies — only `node:*` builtins. Requires Node 18+.
 
+## Contact
+
+Maintained by 元冰可 — [ybkk01@126.com](mailto:ybkk01@126.com) ·
+[企业微信群](https://work.weixin.qq.com/ca/cawcdecedba18d0ddb) ·
+[Telegram](https://t.me/+YvW7087WEq9kMTg9)
+
 MIT

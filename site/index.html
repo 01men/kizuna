@@ -243,13 +243,46 @@ ol.steps li { margin-bottom: 6px; }
     </div>
   </section>
 
+  <!-- ④ 联系我们 -->
+  <section class="panel" id="contact" style="padding:0;overflow:hidden">
+    <contact-channels
+      style="--cc-bg:transparent;--cc-fg:var(--text);--cc-muted:var(--dim);--cc-hover:rgba(128,128,140,.12);--cc-radius:0;--cc-accent:var(--accent);--cc-maxw:800px">
+      <script type="application/json">
+      {
+        "brand": { "name": "元冰可", "tagline": "Connect with\n元冰可", "logo": "" },
+        "heading": "联系我们",
+        "channels": [
+          { "type": "email",    "label": "邮箱",            "value": "ybkk01@126.com" },
+          { "type": "wechat",   "label": "企业微信群",      "value": "https://work.weixin.qq.com/ca/cawcdecedba18d0ddb" },
+          { "type": "telegram", "label": "Telegram 交流群", "value": "https://t.me/+YvW7087WEq9kMTg9" },
+          { "type": "github",   "label": "GitHub",          "value": "https://github.com/01men/kizuna" }
+        ],
+        "cards": [
+          { "label": "元冰可公众号",    "image": "contact-channels/assets/qrcode-official.jpg", "hint": "扫码关注" },
+          { "label": "Telegram 交流群", "image": "contact-channels/assets/qrcode-telegram.png", "href": "https://t.me/+YvW7087WEq9kMTg9", "hint": "扫码加群" }
+        ]
+      }
+      </script>
+    </contact-channels>
+    <noscript>
+      <p style="padding:0 24px 24px;margin:0;color:var(--dim);font-size:13.5px">
+        邮箱 <a href="mailto:ybkk01@126.com">ybkk01@126.com</a> ·
+        <a href="https://work.weixin.qq.com/ca/cawcdecedba18d0ddb">企业微信群</a> ·
+        <a href="https://t.me/+YvW7087WEq9kMTg9">Telegram 交流群</a> ·
+        <a href="https://github.com/01men/kizuna">GitHub</a>
+      </p>
+    </noscript>
+  </section>
+
   <footer>
     开源自托管 · MIT · <a href="https://github.com/01men/kizuna">github.com/01men/kizuna</a><br>
-    <span style="opacity:.7">核心投递自有协议 · A2A 兼容适配 · 数据留在你自己的服务器</span>
+    <span style="opacity:.7">核心投递自有协议 · A2A 兼容适配 · 数据留在你自己的服务器</span><br>
+    <span style="opacity:.7">商务合作 / 问题反馈：<a href="mailto:ybkk01@126.com">ybkk01@126.com</a> · 公众号与交流群见上方</span>
   </footer>
 </div>
 <div id="toast" class="hidden"></div>
 
+<script src="contact-channels/contact-channels.js"></script>
 <script>
 'use strict';
 const DEFAULT_HUB = 'https://kizuna.ybkkasi.com';

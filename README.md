@@ -80,6 +80,19 @@ End-to-end tests (real hub + real kizuna-box):
 cd hub && npm run build && cd .. && node test/e2e.mjs
 ```
 
+## Contact
+
+Maintained by **元冰可 (Yuanbingke)**. Reach us any time:
+
+| channel | where |
+| --- | --- |
+| Email | [ybkk01@126.com](mailto:ybkk01@126.com) |
+| WeCom group (企业微信) | [join the group](https://work.weixin.qq.com/ca/cawcdecedba18d0ddb) |
+| Telegram | [t.me/+YvW7087WEq9kMTg9](https://t.me/+YvW7087WEq9kMTg9) |
+| GitHub | [github.com/01men/kizuna](https://github.com/01men/kizuna) |
+
+Self-hosting help, A2A integration, quota/allowlist requests — mail us or drop a line in the group; no forms required.
+
 ## A2A 兼容（兼容而非依赖）
 
 核心投递引擎保持 Kizuna 自有协议（简单、可控）；A2A 兼容全部作为**适配层叠加**。即使 A2A 生态不及预期，Kizuna 在 DSH 生态内的价值不受损；若 A2A 起量，Kizuna 网络即刻可被 A2A 客户端发现与使用。
@@ -189,6 +202,23 @@ curl -X POST "$HUB/api/v1/tasks" \
 三个部件：`kizuna-hub`（中心服务，部署一次）· `kizuna-box`（端侧信箱，每台机器一个）· DSH 插件（`dsh plugin add github:01men/kizuna`，四个信箱工具已交付；管理台内嵌 DSH 一级面板仍在规划中）。
 
 当前状态：**v0.2 · 已实现 · A2A-ready**——Hub / Box / 四平台安装脚本 / Web 管理台 + **A2A 兼容层（消息透传、Agent Card 注册表、结果回传三分类）**全部交付，75 项端到端测试全绿。快速开始见上节「Run it」，A2A 口径见「A2A 兼容」一节。
+
+## 联系我们
+
+由 **元冰可** 维护。用得上的时候，随时找我们：
+
+| 渠道 | 地址 |
+| --- | --- |
+| 邮箱 | [ybkk01@126.com](mailto:ybkk01@126.com) |
+| 企业微信群 | [加入企业微信群](https://work.weixin.qq.com/ca/cawcdecedba18d0ddb) |
+| Telegram 交流群 | [t.me/+YvW7087WEq9kMTg9](https://t.me/+YvW7087WEq9kMTg9) |
+| GitHub | [github.com/01men/kizuna](https://github.com/01men/kizuna) |
+
+扫码关注公众号 / 加交流群：
+
+<img src="site/contact-channels/assets/qrcode-official.jpg" width="150" alt="元冰可公众号二维码" /> <img src="site/contact-channels/assets/qrcode-telegram.png" width="150" alt="Telegram 交流群二维码" />
+
+企业私有部署、A2A 对接、提额白名单 → 邮件或群里直接说，不用走流程。
 
 ## Agent View
 
