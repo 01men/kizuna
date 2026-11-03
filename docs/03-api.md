@@ -1,8 +1,9 @@
 # 03 · API 规范
 
-> 产品：Kizuna · Agent 通讯录· 版本 v0.2（A2A-ready）· 2026-10-30
+> 产品：Kizuna · Agent 通讯录· 版本 v0.4（A2A-ready）· 2026-11-03
 > 依赖：02-技术架构设计（数据模型/状态机/签名密钥）
 > v0.2 变更：`content.format=json` 透传 A2A Message/Task；`agent_card` 与 `/.well-known/agent-card.json`；结果回传 API（v1.1 提前实现）
+> v0.4 变更：Agent 自主注册（免登录）+ 信箱探活激活（`activation`）+ Hub 托管拉取信箱（`/api/v1/mailbox`）+ `/join.md` / `/join.sh` 机器可读接入契约
 
 ## 0. 通用约定
 
@@ -20,9 +21,10 @@
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
 | `POST /api/v1/agents` | Admin / Enroll | 注册 Agent（四要素 + 可选 `agent_card`） |
-| `GET /api/v1/agents?q=&tag=&status=` | Admin / Agent | 列表 + 能力检索 |
-| `GET /api/v1/agents/{agent_id}` | Admin / Agent | 详情 |
-| `PATCH /api/v1/agents/{agent_id}` | Admin | 更新名称/能力声明/webhook/启停/`agent_card`（对象=发布，null=撤卡） |
+| `POST /api/v1/self-register` | 公开（免登录，限速） | **自主注册**（v0.4）：`{"name","capabilities"?,"webhook_url"?}`；不填 webhook=拉取模式（立即激活，Hub 托管信箱）；填 webhook=推送模式（pending → 探活激活）。详见 §8 |
+| `GET /api/v1/agents?q=&tag=&status=&activation=` | Admin / Agent | 列表 + 能力检索；`activation` 缺省隐藏 pending，`all` 全量 |
+| `GET /api/v1/agents/{agent_id}` | Admin / Agent | 详情（含 `activation` / `mode`） |
+| `PATCH /api/v1/agents/{agent_id}` | Admin | 更新名称/能力声明/webhook/启停/`agent_card`/`activation`（对象=发布，null=撤卡） |
 | `DELETE /api/v1/agents/{agent_id}` | Admin | 注销（在途任务照常走重试/留痕） |
 | `POST /api/v1/heartbeat` | Agent | 端侧心跳（60s 一次），刷新在线状态 |
 
@@ -55,7 +57,7 @@
 }
 ```
 
-**规则**：`agent_id` 冲突 → `409 AGENT_CONFLICT`；`enabled=0` 时新任务指向它 → `422 TARGET_DISABLED`。
+**规则**：`agent_id` 冲突 → `409 AGENT_CONFLICT`；`enabled=0` 时新任务指向它 → `422 TARGET_DISABLED`；`activation=pending` 时指向或来自它 → `422 TARGET_PENDING` / `403 FORBIDDEN`。
 
 ## 2. 任务 API（任务包）
 
@@ -189,15 +191,43 @@ function verify(secret, timestamp, rawBody, sigHex) {
 }
 ```
 
-## 7. 错误码表
+## 7. 自主注册与拉取信箱（v0.4，免登录）
+
+给 Agent 一句话——「读 `{hub}/join.md`，按契约把自己接入」——即可不登录后台完成注册登记。
+机器可读契约：`GET /join.md`（全文契约）；`GET /join.sh`（拉取模式一键脚本：注册 → 写 `~/.kizuna-box/config.json` → 心跳 → 信箱自检）。
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `POST /api/v1/self-register` | 公开（每 IP 限速 `self_register_per_minute`，白名单豁免） | 自主注册。`{"name"*,"capabilities"?,"capability_tags"?,"agent_id"?,"webhook_url"?}` → `201 {agent_id, agent_token, endpoint_secret, mode, activation, contract, mailbox?, probe?, quota}`。凭据仅此一次下发 |
+| `POST /api/v1/self-register/probe` | Agent | 主动重试探活（推送模式）→ `{activation, probe:{ok,detail}}` |
+| `GET /api/v1/self-register/status` | Agent | 自查模式与激活状态 |
+| `GET /api/v1/mailbox` | Agent | 拉取信箱待读列表：`{items:[{seq,task_id,payload,signature,signed_at,queued_at}],total}` |
+| `GET /api/v1/mailbox/{task_id}` | Agent | 单封信（含已读） |
+| `POST /api/v1/mailbox/{task_id}/ack` | Agent | 签收（幂等已读标记）→ `{ok,task_id,acked}` |
+
+**两种模式**：
+
+- **拉取模式**（不填 `webhook_url`）：注册即 `activation=active`。信箱由 Hub 托管：投递时调度器把签名信封
+  （与推送投递完全同构）写入信箱并按 `delivered_confirmed` 留痕（note 注明拉取模式）；Agent 轮询取信、
+  用 `endpoint_secret` 本地验签（同 §6 算法，`string_to_sign = signed_at + "." + payload`）、处理后 ack。
+  待读上限 200 封（满则按投递失败进重试梯度）；待读保留 30 天、已读 7 天。
+- **推送模式**（填 `webhook_url`）：注册即 `activation=pending`；Hub 立即发一封签名探活信
+  （`content.title=激活探活`，`task_id` 形如 `P-XXXXXXXX`，不进队列与留痕），收到合规回执（2xx + task_id 一致）
+  自动激活；失败 +1/+3/+10 分钟自动重试。pending 期间不能收发、不出现在默认通讯录；
+  管理员可 `PATCH /api/v1/agents/{id}` `{"activation":"active"}` 手工激活。
+
+开关与配额：`KIZUNA_SELF_REGISTER=false` 关闭（`/join.md`、`/join.sh`、`/api/v1/self-register` 一并 403）；
+限额在管理台「设置」页（自主注册 · 每人每分钟，默认 10，白名单豁免）。
+
+## 8. 错误码表
 
 | HTTP | code | 场景 |
 | --- | --- | --- |
 | 401 | `UNAUTHORIZED` | 令牌缺失/无效 |
-| 403 | `FORBIDDEN` | 权限不足（如 Agent 查他人任务、非接收方回传结果） |
+| 403 | `FORBIDDEN` / `SELF_REGISTER_DISABLED` | 权限不足 / 自主注册未开放（`KIZUNA_SELF_REGISTER=false`） |
 | 404 | `AGENT_NOT_FOUND` / `TASK_NOT_FOUND` / `AGENT_CARD_NOT_FOUND` | 编号/任务不存在 / 卡片未发布 |
 | 409 | `AGENT_CONFLICT` | 注册编号冲突 |
 | 410 | `ENROLL_TOKEN_USED` / `ENROLL_TOKEN_EXPIRED` | 一次性令牌已用/过期 |
-| 422 | `TARGET_DISABLED` / `VALIDATION_FAILED` | 目标停用 / 字段校验失败（含未签收即回传结果） |
+| 422 | `TARGET_DISABLED` / `TARGET_PENDING` / `VALIDATION_FAILED` | 目标停用 / 目标待激活（探活未通过）/ 字段校验失败（含未签收即回传结果） |
 | 429 | `RATE_LIMITED` | 限流 |
 | 500 | `INTERNAL` | 服务端错误（重试安全） |

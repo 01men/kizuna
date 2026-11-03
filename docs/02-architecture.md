@@ -153,6 +153,18 @@ CREATE INDEX idx_results_task ON task_results(task_id, id);
 
 > v0.2 就地迁移（幂等）：`agents` 增加 `agent_card TEXT`（A2A Agent Card，原样 JSON），`tasks` 增加 `reply_to TEXT`（回执信件串联原任务）。v0.1 建库脚本对应语句为 `CREATE TABLE IF NOT EXISTS`，迁移由 Hub 启动时自动完成。
 
+### 3.x v0.4 增量：`agents.activation` 与 `mailbox` 表（自主注册 / 拉取模式）
+
+- `agents.activation`（`active` | `pending`，存量行默认 `active`，就地迁移）：自主注册的推送模式 Agent
+  注册后为 `pending`，信箱探活（与投递同构的签名信 + 合规回执判定）通过后转 `active`；
+  pending 不进默认通讯录（`GET /api/v1/agents` 缺省过滤），收发均被拒（`422 TARGET_PENDING` / `403`）。
+- `mailbox` 表（Hub 托管信箱，拉取模式）：调度器对无 webhook 的目标不再判 `invalid_target`，
+  而是把与推送投递**完全同构的签名信封**（`payload` + `signature` + `signed_at`）写入信箱，
+  按 `delivered_confirmed` 留痕（note 注明拉取模式）；收件方凭 agent_token 拉取（`GET /api/v1/mailbox`）、
+  本地验签后 ack（幂等已读）。约束：单收件方待读上限 200（满则按投递失败进重试梯度）；
+  待读保留 30 天、已读 7 天，调度器每小时清理。
+- 探活信（`task_id` 形如 `P-XXXXXXXX`）不进队列与留痕，只驱动 `activation` 状态机。
+
 ## 4. 任务包状态机
 
 ```mermaid

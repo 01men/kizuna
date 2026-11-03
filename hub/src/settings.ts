@@ -18,6 +18,8 @@ export interface Settings {
   heartbeat_window_s: number;
   /** 公开安装配额：每 IP 每分钟次数，默认 10 */
   public_install_per_minute: number;
+  /** 自主注册配额：每 IP 每分钟次数，默认 10 */
+  self_register_per_minute: number;
   /** 演示沙箱配额：每 IP 每分钟次数，默认 10 */
   demo_per_minute: number;
   /** 白名单（IP 或 CIDR）：命中后不限流。用于社区机器人/官方巡检/自有固定出口 */
@@ -35,6 +37,7 @@ export const DEFAULT_SETTINGS: Settings = {
   content_minimized: true,
   heartbeat_window_s: 300,
   public_install_per_minute: 10,
+  self_register_per_minute: 10,
   demo_per_minute: 10,
   rate_limit_allowlist: [],
   quota_contact: 'https://github.com/01men/kizuna/issues/new?labels=quota&title=%5B%E6%8F%90%E9%A2%9D%5D+',
@@ -72,6 +75,7 @@ for (const [k, lo, hi] of [
     ['audit_retention_days', 1, 3650],
     ['heartbeat_window_s', 30, 3600],
     ['public_install_per_minute', 1, 600],
+    ['self_register_per_minute', 1, 600],
     ['demo_per_minute', 1, 600],
   ] as const) {
     if (o[k] !== undefined) {

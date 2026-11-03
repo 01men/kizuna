@@ -194,6 +194,21 @@ CREATE TABLE IF NOT EXISTS task_results (
   reported_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_results_task ON task_results(task_id, id);
+
+-- v0.4 Hub 托管信箱（拉取模式）：无 webhook 的 Agent 由 Hub 代收信件，凭 agent_token 拉取。
+-- payload 为与推送投递完全一致的签名信封；signature = HMAC(endpoint_secret, signed_at + "." + payload)。
+CREATE TABLE IF NOT EXISTS mailbox (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    TEXT NOT NULL UNIQUE,
+  to_agent   TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  TEXT NOT NULL,
+  state      TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  read_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_to ON mailbox(to_agent, state, seq);
 `;
 
 /** 已有库的就地迁移（幂等）：v0.2 起 agents 增加 agent_card，tasks 增加 reply_to */
@@ -209,6 +224,11 @@ function migrate(db: DB): void {
     db.exec('ALTER TABLE audit_logs ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0');
     // 存量回填：旧版演示沙箱写入的留痕以 AL-DEMO- 开头
     db.exec("UPDATE audit_logs SET is_demo = 1 WHERE log_id LIKE 'AL-DEMO-%'");
+  }
+  // v0.4：Agent 激活状态（active / pending）。pending = 自主注册的推送 Agent，信箱探活未通过；
+  // 存量与拉取模式 Agent 均为 active（DEFAULT 兜底，旧行零迁移成本）。
+  if (!agentCols.includes('activation')) {
+    db.exec("ALTER TABLE agents ADD COLUMN activation TEXT NOT NULL DEFAULT 'active'");
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_audit_demo ON audit_logs(is_demo, id)');
 }

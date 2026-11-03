@@ -98,7 +98,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, ctx: RouteC
   fastify.get('/api/v1/agents', async (req) => {
     requireAny(req);
     rateLimit(`agents_list:${req.auth?.agent?.agent_id ?? 'admin'}`, 300);
-    const q = req.query as { q?: string; tag?: string; status?: string; enabled?: string; limit?: string; offset?: string };
+    const q = req.query as { q?: string; tag?: string; status?: string; enabled?: string; activation?: string; limit?: string; offset?: string };
     const limit = Math.min(Math.max(Number(q.limit ?? 50) || 50, 1), 500);
     const offset = Math.max(Number(q.offset ?? 0) || 0, 0);
 
@@ -116,6 +116,13 @@ export default async function agentsRoutes(fastify: FastifyInstance, ctx: RouteC
     if (q.enabled === 'true' || q.enabled === 'false') {
       where.push('enabled = ?');
       params.push(q.enabled === 'true' ? 1 : 0);
+    }
+    // 激活状态过滤：默认隐藏 pending（自主注册探活未通过的不进公开通讯录）；all = 全部
+    if (q.activation === 'pending' || q.activation === 'active') {
+      where.push('activation = ?');
+      params.push(q.activation);
+    } else if (q.activation !== 'all') {
+      where.push("activation != 'pending'");
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -174,6 +181,14 @@ export default async function agentsRoutes(fastify: FastifyInstance, ctx: RouteC
       if (typeof body.enabled !== 'boolean') throw err.validation('enabled 必须是布尔值');
       sets.push('enabled = ?');
       params.push(body.enabled ? 1 : 0);
+    }
+    if (body.activation !== undefined) {
+      // 管理员可手工激活（探活失败但确认可达时），或重新挂起
+      if (body.activation !== 'active' && body.activation !== 'pending') {
+        throw err.validation("activation 只能是 'active' 或 'pending'");
+      }
+      sets.push('activation = ?');
+      params.push(body.activation);
     }
     if (body.agent_card !== undefined) {
       // 对象 = 发布/更新；null = 撤卡

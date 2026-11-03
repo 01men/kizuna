@@ -33,6 +33,10 @@ export interface AgentView {
   webhook_url: string;
   enabled: boolean;
   status: 'online' | 'offline' | 'unknown';
+  /** 激活状态：pending = 推送注册探活未通过，暂不能收发，也不出现在默认通讯录列表 */
+  activation: 'active' | 'pending';
+  /** 收信方式：push = Hub 反向投递 webhook；pull = Hub 托管信箱，凭 agent_token 拉取 */
+  mode: 'push' | 'pull';
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -62,6 +66,8 @@ export function toView(agent: AgentRow): AgentView {
     webhook_url: agent.webhook_url,
     enabled: agent.enabled === 1,
     status: computeStatus(agent),
+    activation: agent.activation === 'pending' ? 'pending' : 'active',
+    mode: agent.webhook_url ? 'push' : 'pull',
     last_seen_at: agent.last_seen_at,
     created_at: agent.created_at,
     updated_at: agent.updated_at,

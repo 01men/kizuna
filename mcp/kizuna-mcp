@@ -36,6 +36,7 @@ function loadConfig() {
     hubUrl: (process.env.KIZUNA_HUB_URL || file.hub_url || '').replace(/\/+$/, ''),
     agentToken: process.env.KIZUNA_AGENT_TOKEN || file.agent_token || '',
     adminToken: process.env.KIZUNA_ADMIN_TOKEN || '',
+    endpointSecret: file.endpoint_secret || '',
     boxUrl: (process.env.KIZUNA_BOX_URL || `http://127.0.0.1:${file.listen?.port ?? 7788}`).replace(/\/+$/, ''),
     agentId: file.agent_id || '',
   };
@@ -74,6 +75,37 @@ async function boxCall(cfg, { method = 'GET', path: p, body }) {
   try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 2000) }; }
   if (!res.ok) throw new Error(`${res.status} ${json?.error?.message ?? text.slice(0, 200)}`);
   return json;
+}
+
+/** 免鉴权公开端点（自主注册 / join 契约） */
+async function callPublic(cfg, { method = 'GET', path: p, body, timeoutMs = 20000 }) {
+  const base = cfg.hubUrl;
+  if (!base) throw new Error('未配置 hub：设置 KIZUNA_HUB_URL（如 https://kizuna.example.com）');
+  const res = await fetch(base + p, {
+    method,
+    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const t = await res.text();
+  let json;
+  try { json = JSON.parse(t); } catch { json = { raw: t.slice(0, 2000) }; }
+  if (!res.ok) {
+    const err = json?.error ?? {};
+    throw new Error(`${res.status} ${err.code ?? ''} ${err.message ?? t.slice(0, 200)}`.trim());
+  }
+  return json;
+}
+
+/** 凭据落盘（与安装脚本同一路径 ~/.kizuna-box/config.json，600 权限，保留已有字段） */
+function persistCredentials(cfg, patch) {
+  const cfgPath = process.env.KIZUNA_BOX_CONFIG ?? path.join(os.homedir(), '.kizuna-box', 'config.json');
+  let prev = {};
+  try { prev = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { /* 首次写入 */ }
+  const next = { ...prev, ...patch };
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  return cfgPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +197,40 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } } },
   },
   {
+    name: 'kizuna_join',
+    description:
+      '自主注册（免登录）：把当前 Agent 登记进 Kizuna 通讯并获得任务邮箱。默认拉取模式（信箱由 Hub 托管，' +
+      '零安装，凭 agent_token 调 kizuna_list_mailbox 取信）；传 webhook_url 则为推送模式，需先有按契约回执的收信服务。' +
+      '注册后凭据自动写入 ~/.kizuna-box/config.json（仅此一次下发）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '你在通讯录里的名字（≤120 字）' },
+        capabilities: { type: 'string', description: '能力声明一句话（≤300 字）' },
+        capability_tags: { type: 'array', items: { type: 'string' }, description: '能力标签（可选，≤16 个）' },
+        agent_id: { type: 'string', description: '自定义编号（可选，留空自动分配 A-XXXX）' },
+        webhook_url: { type: 'string', description: '推送模式收信地址（可选；不填 = 拉取模式，推荐）' },
+        hub_url: { type: 'string', description: 'Hub 地址（可选；默认用当前配置的 hub）' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'kizuna_list_mailbox',
+    description:
+      '读取 Hub 托管信箱中的待读信件（拉取模式，走 Hub API）。每封信带签名信封：用 endpoint_secret 验签' +
+      '（HMAC-SHA256(signed_at + "." + payload)）后再处理，然后 kizuna_ack_letter 签收。',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: '返回条数，默认 100' } },
+    },
+  },
+  {
+    name: 'kizuna_ack_letter',
+    description: '签收 Hub 托管信箱中的某封信（幂等已读标记；acked=false 表示此前已签收）。',
+    inputSchema: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+  },
+  {
     name: 'kizuna_whoami',
     description: '查看当前 MCP 连接的身份与 Hub 地址（排障用）。',
     inputSchema: { type: 'object', properties: {} },
@@ -238,6 +304,72 @@ async function handleTool(cfg, name, args) {
       if (!res.ok) throw new Error(`${res.status} ${body?.error?.code ?? ''} ${body?.error?.message ?? ''}`.trim());
       return text(body);
     }
+    case 'kizuna_join': {
+      const body = { name: String(args.name) };
+      if (args.capabilities !== undefined) body.capabilities = String(args.capabilities);
+      if (Array.isArray(args.capability_tags)) body.capability_tags = args.capability_tags.map(String);
+      if (args.agent_id) body.agent_id = String(args.agent_id);
+      if (args.webhook_url) body.webhook_url = String(args.webhook_url);
+      const hub = args.hub_url ? String(args.hub_url).replace(/\/+$/, '') : cfg.hubUrl;
+      if (!hub) throw new Error('未配置 hub：传 args.hub_url 或设置 KIZUNA_HUB_URL');
+      const res = await fetch(hub + '/api/v1/self-register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30000),
+      });
+      const t = await res.text();
+      let json;
+      try { json = JSON.parse(t); } catch { json = { raw: t.slice(0, 2000) }; }
+      if (!res.ok) {
+        const err = json?.error ?? {};
+        throw new Error(`${res.status} ${err.code ?? ''} ${err.message ?? t.slice(0, 200)}`.trim());
+      }
+      const cfgPath = persistCredentials(cfg, {
+        hub_url: hub,
+        agent_id: json.agent_id,
+        agent_token: json.agent_token,
+        endpoint_secret: json.endpoint_secret,
+        webhook_url: json.webhook_url ?? '',
+      });
+      // 同一 MCP 会话内立即生效：注册前 cfg 是空的（进程启动时读到空配置），这里同步内存态
+      cfg.hubUrl = hub;
+      cfg.agentToken = json.agent_token;
+      cfg.endpointSecret = json.endpoint_secret;
+      cfg.agentId = json.agent_id;
+      return text({
+        ok: true,
+        agent_id: json.agent_id,
+        mode: json.mode,
+        activation: json.activation,
+        credentials_written_to: cfgPath,
+        note: json.note,
+        next: '用 kizuna_list_mailbox 取信（拉取模式）；kizuna_send_task 发信；每 60s 心跳可调 kizuna_whoami 确认在线。',
+        contract: json.contract,
+      });
+    }
+    case 'kizuna_list_mailbox': {
+      const limit = Math.min(Number(args.limit) || 100, 500);
+      const r = await call(cfg, { path: `/api/v1/mailbox?limit=${limit}` });
+      // 代理端顺手验签（与推送收信同一算法），每封信标注 verified，Agent 不必自己实现 HMAC
+      const crypto = require('node:crypto');
+      const items = (r.items ?? []).map((l) => {
+        let verified = null;
+        let payload = l.payload;
+        if (cfg.endpointSecret) {
+          try {
+            const expect = crypto.createHmac('sha256', cfg.endpointSecret).update(`${l.signed_at}.${l.payload}`).digest('hex');
+            verified = `sha256=${expect}` === l.signature;
+            payload = JSON.parse(l.payload);
+          } catch { verified = false; }
+        }
+        return { ...l, payload, verified };
+      });
+      return text({ ...r, verify_hint: cfg.endpointSecret ? undefined : '未配置 endpoint_secret，无法代理验签；请自行校验 signature 后再处理' , items });
+    }
+    case 'kizuna_ack_letter': {
+      return text(await call(cfg, { method: 'POST', path: `/api/v1/mailbox/${encodeURIComponent(args.task_id)}/ack`, body: {} }));
+    }
     case 'kizuna_whoami': {
       return text({
         hub_url: cfg.hubUrl || '(未配置)',
@@ -274,8 +406,9 @@ async function handleRpc(cfg, req) {
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: 'kizuna', version: VERSION },
             instructions:
-              'Kizuna 是 Agent 通讯录与可靠任务投递网络。用 kizuna_list_agents 找目标 Agent，' +
-              'kizuna_send_task 发任务（支持 A2A Message），kizuna_list_my_letters 读自己的信箱，' +
+              'Kizuna 是 Agent 通讯录与可靠任务投递网络。kizuna_join 可免登录自主注册（获得任务邮箱）；' +
+              '用 kizuna_list_agents 找目标 Agent，kizuna_send_task 发任务（支持 A2A Message），' +
+              'kizuna_list_my_letters 读本机信箱、kizuna_list_mailbox 读 Hub 托管信箱（拉取模式，已代为验签），' +
               'kizuna_report_result 回传结果（终态自动回执发起方）。',
           },
         });

@@ -14,7 +14,7 @@ interface DeliveryPayload {
   meta: { attempt: number; enqueued_at: string; hub: string };
 }
 
-type Outcome = 'ack' | 'bad_ack' | 'http_4xx' | 'http_5xx' | 'timeout' | 'network_error';
+type Outcome = 'ack' | 'bad_ack' | 'http_4xx' | 'http_5xx' | 'timeout' | 'network_error' | 'mailbox' | 'mailbox_full';
 
 interface AttemptResult {
   outcome: Outcome;
@@ -25,12 +25,19 @@ interface AttemptResult {
 
 const TICK_MS = 1000;
 
+/** 单个 Agent 拉取信箱的待读上限；满则按投递失败进重试梯度 */
+const MAILBOX_PENDING_CAP = 200;
+/** 拉取信箱保留期：待读 30 天、已读 7 天，过期由调度器每小时清理 */
+const MAILBOX_PENDING_TTL_MS = 30 * 86400_000;
+const MAILBOX_READ_TTL_MS = 7 * 86400_000;
+
 export class Dispatcher {
   private timer: NodeJS.Timeout | null = null;
   private inFlight = 0;
   /** 同一目标串行：正在投递中的目标编号 */
   private busyTargets = new Set<string>();
   private stopped = false;
+  private lastMailboxCleanup = 0;
 
   constructor(
     private readonly db: DB,
@@ -62,6 +69,7 @@ export class Dispatcher {
     gauges.queueDepth = (this.db.prepare(`SELECT COUNT(*) AS c FROM tasks`).get() as { c: number }).c;
     gauges.retrying = (this.db.prepare(`SELECT COUNT(*) AS c FROM tasks WHERE status = 'wait_retry'`).get() as { c: number }).c;
     this.refreshOnlineGauge();
+    this.cleanupMailbox(now);
 
     if (this.inFlight >= settings.delivery_concurrency) return;
     const candidates = this.db
@@ -102,11 +110,16 @@ export class Dispatcher {
 
   private async deliver(task: QueuedTaskRow): Promise<void> {
     const target = findAgent(this.db, task.to_agent);
-    // 目标消失/停用/无 webhook：不重试，直接出队留痕（02 §4 设计决策）
-    if (!target || target.enabled !== 1 || !target.webhook_url) {
+    // 目标消失/停用/待激活/无 webhook（且非拉取）：按各自原因出队留痕（02 §4 设计决策）
+    if (!target || target.enabled !== 1) {
       const attempts = this.attemptsOf(task.task_id);
-      const reason = !target ? '目标编号不存在' : target.enabled !== 1 ? '目标已停用' : '目标缺少 webhook';
+      const reason = !target ? '目标编号不存在' : '目标已停用';
       this.finalize(task, 'invalid_target', attempts, reason);
+      return;
+    }
+    if (target.activation === 'pending') {
+      const attempts = this.attemptsOf(task.task_id);
+      this.finalize(task, 'invalid_target', attempts, '目标待激活（信箱探活未通过）');
       return;
     }
 
@@ -118,14 +131,20 @@ export class Dispatcher {
     const signature =
       'sha256=' + crypto.createHmac('sha256', target.endpoint_secret).update(timestamp + '.' + rawBody).digest('hex');
 
-    const url = this.deliverUrl(target.webhook_url);
-    const result = await this.post(url, rawBody, {
-      'content-type': 'application/json',
-      'x-kizuna-task-id': task.task_id,
-      'x-kizuna-timestamp': timestamp,
-      'x-kizuna-signature': signature,
-      'x-kizuna-attempt': String(attemptNo),
-    }, settings.ack_timeout_s * 1000);
+    let result: AttemptResult;
+    if (!target.webhook_url) {
+      // 拉取模式：Hub 托管信箱代收。签名信封与推送投递完全一致，取信方自行验签（join.md 契约）。
+      result = this.deliverToMailbox(task.to_agent, payload.task_id, rawBody, signature, timestamp);
+    } else {
+      const url = this.deliverUrl(target.webhook_url);
+      result = await this.post(url, rawBody, {
+        'content-type': 'application/json',
+        'x-kizuna-task-id': task.task_id,
+        'x-kizuna-timestamp': timestamp,
+        'x-kizuna-signature': signature,
+        'x-kizuna-attempt': String(attemptNo),
+      }, settings.ack_timeout_s * 1000);
+    }
 
     incr(counters.deliveriesTotal, result.outcome);
     latency.count += 1;
@@ -143,6 +162,12 @@ export class Dispatcher {
     if (result.outcome === 'ack') {
       this.finalize(task, 'delivered_confirmed', attempts);
       this.log.info({ task_id: task.task_id, attempt: attemptNo, latency_ms: result.latencyMs }, 'delivery acknowledged');
+      return;
+    }
+    if (result.outcome === 'mailbox') {
+      // 信已由 Hub 信箱签收（有签名回执语义）：凭回执销单，留痕注明拉取模式
+      this.finalize(task, 'delivered_confirmed', attempts, '拉取模式：信件存入 Hub 托管信箱，待收件方拉取');
+      this.log.info({ task_id: task.task_id, attempt: attemptNo, to: task.to_agent }, 'letter queued to hub mailbox');
       return;
     }
 
@@ -163,6 +188,48 @@ export class Dispatcher {
       { task_id: task.task_id, attempt: attemptNo, outcome: result.outcome, http_status: result.httpStatus, next_action_at: nextAt },
       'delivery failed, retry scheduled',
     );
+  }
+
+  /** 拉取模式入箱：满箱/写库失败返回 mailbox_full（走重试梯度），成功返回 mailbox */
+  private deliverToMailbox(toAgent: string, taskId: string, rawBody: string, signature: string, timestamp: string): AttemptResult {
+    const started = Date.now();
+    const pending = (this.db
+      .prepare(`SELECT COUNT(*) AS c FROM mailbox WHERE to_agent = ? AND state = 'pending'`)
+      .get(toAgent) as { c: number }).c;
+    if (pending >= MAILBOX_PENDING_CAP) {
+      return { outcome: 'mailbox_full', latencyMs: Date.now() - started, detail: `收件方信箱待读已满（${pending}/${MAILBOX_PENDING_CAP}）` };
+    }
+    try {
+      this.db
+        .prepare(`INSERT INTO mailbox (task_id, to_agent, payload, signature, signed_at, state, created_at)
+                  VALUES (?, ?, ?, ?, ?, 'pending', ?)`)
+        .run(taskId, toAgent, rawBody, signature, timestamp, new Date().toISOString());
+      return { outcome: 'mailbox', latencyMs: Math.max(1, Date.now() - started) };
+    } catch (e) {
+      return { outcome: 'mailbox_full', latencyMs: Date.now() - started, detail: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 信箱保留期清理：待读 30 天、已读 7 天；每小时执行一次 */
+  private cleanupMailbox(now: string): void {
+    if (Date.now() - this.lastMailboxCleanup < 3600_000) return;
+    this.lastMailboxCleanup = Date.now();
+    try {
+      const expiredPending = this.db
+        .prepare(`DELETE FROM mailbox WHERE state = 'pending' AND created_at < ?`)
+        .run(new Date(Date.parse(now) - MAILBOX_PENDING_TTL_MS).toISOString());
+      const expiredRead = this.db
+        .prepare(`DELETE FROM mailbox WHERE state = 'read' AND read_at IS NOT NULL AND read_at < ?`)
+        .run(new Date(Date.parse(now) - MAILBOX_READ_TTL_MS).toISOString());
+      if (expiredPending.changes > 0 || expiredRead.changes > 0) {
+        this.log.info(
+          { expired_pending: expiredPending.changes, expired_read: expiredRead.changes },
+          'mailbox retention cleanup',
+        );
+      }
+    } catch (e) {
+      this.log.warn({ err: String(e) }, 'mailbox cleanup failed');
+    }
   }
 
   private deliverUrl(webhookUrl: string): string {

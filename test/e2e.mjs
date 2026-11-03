@@ -6,10 +6,11 @@
  *       enroll 一次性令牌 / 总览 / 留痕导出 / metrics / 管理台静态资源
  * 运行：node test/e2e.mjs   （需先 cd hub && npm run build）
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import http from 'node:http';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
@@ -486,6 +487,149 @@ async function main() {
       body: { demo_per_minute: 10, public_install_per_minute: 10, rate_limit_allowlist: ['127.0.0.1', '::1'] },
     });
 
+    console.log('▶ Agent 自主注册（免登录）· Hub 托管信箱（拉取模式）· join 契约');
+    // ---- 拉取模式：注册即激活，信箱 Hub 托管 ----
+    const sr = await fetch(`${HUB}/api/v1/self-register`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: '自主接入拉取Agent', capabilities: 'e2e 自主注册', capability_tags: ['e2e', 'pull'] }),
+    });
+    const srj = await sr.json();
+    ok('POST /api/v1/self-register 免登录 201', sr.status === 201 && srj.ok === true, JSON.stringify(srj).slice(0, 160));
+    ok('拉取模式立即激活并下发凭据', srj.mode === 'pull' && srj.activation === 'active'
+      && String(srj.agent_token).startsWith('at_') && String(srj.endpoint_secret).startsWith('es_') && srj.contract === `${HUB}/join.md`);
+    ok('注册响应带信箱用法指引', srj.mailbox?.list?.path === '/api/v1/mailbox' && /HMAC_SHA256/.test(srj.mailbox?.verify ?? ''));
+
+    // admin → 拉取 Agent 的第一封信
+    const stPull = await api('/api/v1/tasks', { method: 'POST', body: { to: srj.agent_id, content: { title: '拉取模式第一封信', body: 'hello pull' } } });
+    const stPullJ = stPull.json;
+    ok('给拉取 Agent 发信 202', stPull.status === 202 && String(stPullJ.task_id).startsWith('T-'), stPull.text.slice(0, 120));
+    await waitFor('拉取信箱出现信件', async () => {
+      const r = await fetch(`${HUB}/api/v1/mailbox`, { headers: { authorization: `Bearer ${srj.agent_token}` } });
+      return (await r.json()).total >= 1;
+    });
+    const mb = await (await fetch(`${HUB}/api/v1/mailbox`, { headers: { authorization: `Bearer ${srj.agent_token}` } })).json();
+    const mbLetter = mb.items.find((x) => x.task_id === stPullJ.task_id);
+    ok('信箱信件带签名信封', Boolean(mbLetter) && String(mbLetter.signature).startsWith('sha256=') && mbLetter.signed_at && mbLetter.payload.includes('拉取模式第一封信'));
+    const expectSig = 'sha256=' + crypto.createHmac('sha256', srj.endpoint_secret).update(`${mbLetter.signed_at}.${mbLetter.payload}`).digest('hex');
+    ok('拉取信件可本地验签（与推送同一算法）', expectSig === mbLetter.signature);
+    const envelope = JSON.parse(mbLetter.payload);
+    ok('信封结构与推送投递一致', envelope.task_id === stPullJ.task_id && envelope.content.title === '拉取模式第一封信' && envelope.meta.hub === HUB);
+
+    const ack1 = await fetch(`${HUB}/api/v1/mailbox/${stPullJ.task_id}/ack`, { method: 'POST', headers: { authorization: `Bearer ${srj.agent_token}` } });
+    ok('ack 幂等签收 acked=true', ack1.status === 200 && (await ack1.json()).acked === true);
+    const ack2 = await fetch(`${HUB}/api/v1/mailbox/${stPullJ.task_id}/ack`, { method: 'POST', headers: { authorization: `Bearer ${srj.agent_token}` } });
+    ok('重复 ack 幂等 acked=false', (await ack2.json()).acked === false);
+    const mbAfter = await (await fetch(`${HUB}/api/v1/mailbox`, { headers: { authorization: `Bearer ${srj.agent_token}` } })).json();
+    ok('签收后待读清零', mbAfter.total === 0);
+    const srAudit = await api(`/api/v1/tasks/${stPullJ.task_id}`);
+    ok('拉取投递按 delivered_confirmed 留痕（finalized）', srAudit.json.finalized === true && srAudit.json.status === 'delivered_confirmed', srAudit.text.slice(0, 160));
+    const srResult = await fetch(`${HUB}/api/v1/tasks/${stPullJ.task_id}/result`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${srj.agent_token}` },
+      body: JSON.stringify({ state: 'completed', message: '拉取 Agent 完成处理' }),
+    });
+    ok('拉取 Agent 可凭令牌回传结果', srResult.status === 202 && (await srResult.json()).category === 'terminal');
+    // 拉取 Agent 也能主动发信（发给已有 box Agent，走正常推送）
+    const sendBack = await fetch(`${HUB}/api/v1/tasks`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${srj.agent_token}` },
+      body: JSON.stringify({ to: 'A-BOXTEST', content: { title: '来自拉取 Agent', body: 'pull agent says hi' } }),
+    });
+    ok('拉取 Agent 可主动发信 202', sendBack.status === 202);
+
+    // ---- join 契约端点 ----
+    const joinMd = await fetch(`${HUB}/join.md`);
+    const joinMdText = await joinMd.text();
+    ok('GET /join.md 200 且含完整契约', joinMd.status === 200 && joinMdText.includes('/api/v1/self-register') && joinMdText.includes('/api/v1/mailbox') && joinMdText.includes('HMAC_SHA256'));
+    const joinSh = await fetch(`${HUB}/join.sh`);
+    const joinShText = await joinSh.text();
+    ok('GET /join.sh 200 且内嵌 Hub 地址', joinSh.status === 200 && joinShText.includes(HUB) && joinShText.includes('self-register'));
+
+    // ---- join.sh 实跑（隔离 HOME）：一句话命令 → 注册 → 凭据落盘 → 信箱自检 ----
+    const joinHome = path.join(tmp, 'join-home');
+    fs.mkdirSync(joinHome, { recursive: true });
+    const joined = spawnSync('bash', ['-c', `curl -fsSL ${HUB}/join.sh | NAME='E2E自主接入' CAPS='join.sh e2e' bash`], {
+      env: { ...process.env, HOME: joinHome }, encoding: 'utf8', timeout: 60000,
+    });
+    ok('join.sh 一行命令执行成功', joined.status === 0 && /注册完成/.test(joined.stdout), (joined.stdout + joined.stderr).slice(-300));
+    const joinCfgPath = path.join(joinHome, '.kizuna-box', 'config.json');
+    let joinCfg = null;
+    try { joinCfg = JSON.parse(fs.readFileSync(joinCfgPath, 'utf8')); } catch { /* 读取失败由断言报告 */ }
+    ok('join.sh 凭据已写入 config.json（600）', Boolean(joinCfg?.agent_token?.startsWith('at_') && joinCfg?.endpoint_secret?.startsWith('es_') && joinCfg?.hub_url === HUB));
+    const joinMail = await fetch(`${HUB}/api/v1/mailbox`, { headers: { authorization: `Bearer ${joinCfg?.agent_token ?? ''}` } });
+    ok('join.sh 注册的 Agent 信箱立即可用', joinMail.status === 200 && (await joinMail.json()).total === 0);
+    // 信箱按令牌隔离：join Agent 的令牌读不到 srj 的信件（各自只能看自己的信箱）
+    const mbIsolated = await (await fetch(`${HUB}/api/v1/mailbox`, { headers: { authorization: `Bearer ${joinCfg?.agent_token ?? 'x'}` } })).json();
+    ok('信箱按令牌隔离（他人令牌看不到别人的信）', !mbIsolated.items?.some((x) => x.task_id === stPullJ.task_id));
+    // 重跑幂等：已有凭据跳过注册
+    const joined2 = spawnSync('bash', ['-c', `curl -fsSL ${HUB}/join.sh | NAME='E2E自主接入' bash`], {
+      env: { ...process.env, HOME: joinHome }, encoding: 'utf8', timeout: 30000,
+    });
+    ok('join.sh 重跑幂等（跳过注册保留凭据）', joined2.status === 0 && /跳过注册/.test(joined2.stdout));
+
+    // ---- 推送模式：pending 门禁 → 探活激活 → 正常收发 ----
+    let recvSecret = null;
+    let recvLast = null;
+    const recv = http.createServer((rq, rs) => {
+      let chunks = [];
+      rq.on('data', (c) => chunks.push(c));
+      rq.on('end', () => {
+        const raw = Buffer.concat(chunks).toString();
+        const ts = rq.headers['x-kizuna-timestamp'];
+        const sig = String(rq.headers['x-kizuna-signature'] ?? '');
+        let body = {};
+        try { body = JSON.parse(raw); } catch { /* 保持空对象 */ }
+        const expect = recvSecret ? crypto.createHmac('sha256', recvSecret).update(`${ts}.${raw}`).digest('hex') : '';
+        if (recvSecret && sig === `sha256=${expect}`) {
+          recvLast = { task_id: body.task_id, title: body.content?.title };
+          rs.writeHead(200, { 'content-type': 'application/json' });
+          rs.end(JSON.stringify({ status: 'received', task_id: body.task_id }));
+        } else {
+          rs.writeHead(401, { 'content-type': 'application/json' });
+          rs.end(JSON.stringify({ error: { code: 'INVALID_SIGNATURE', message: 'bad signature' } }));
+        }
+      });
+    });
+    await new Promise((r) => recv.listen(17999, '127.0.0.1', r));
+    try {
+      // 注册时探活服务还没有正确密钥 → 首次探活失败 → pending
+      const sr2 = await fetch(`${HUB}/api/v1/self-register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '自主接入推送Agent', webhook_url: 'http://127.0.0.1:17999' }),
+      });
+      const sr2j = await sr2.json();
+      ok('推送模式注册 201 且首探未通过 → pending', sr2.status === 201 && sr2j.mode === 'push' && sr2j.activation === 'pending' && sr2j.probe?.attempted === true && sr2j.probe?.ok === false, JSON.stringify(sr2j).slice(0, 200));
+
+      const denySend = await fetch(`${HUB}/api/v1/tasks`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${sr2j.agent_token}` },
+        body: JSON.stringify({ to: srj.agent_id, content: { body: 'pending 不能发信' } }),
+      });
+      ok('pending Agent 发信被拒 403', denySend.status === 403);
+      const denyRecv = await api('/api/v1/tasks', { method: 'POST', body: { to: sr2j.agent_id, content: { body: '给 pending 的信' } } });
+      ok('给 pending Agent 发信 422 TARGET_PENDING', denyRecv.status === 422 && denyRecv.json.error.code === 'TARGET_PENDING');
+      const listDefault = await api('/api/v1/agents?limit=500');
+      ok('pending 不出现在默认通讯录', !listDefault.json.items.some((a) => a.agent_id === sr2j.agent_id));
+      const listAll = await api('/api/v1/agents?activation=all&limit=500');
+      const pendingRow = listAll.json.items.find((a) => a.agent_id === sr2j.agent_id);
+      ok('activation=all 可见 pending 且 mode=push', Boolean(pendingRow) && pendingRow.activation === 'pending' && pendingRow.mode === 'push');
+
+      // 收信服务就位（用注册返回的 endpoint_secret）→ 主动探活 → active
+      recvSecret = sr2j.endpoint_secret;
+      const probeRes = await fetch(`${HUB}/api/v1/self-register/probe`, {
+        method: 'POST', headers: { authorization: `Bearer ${sr2j.agent_token}` }, body: '{}',
+      });
+      const probeJ = await probeRes.json();
+      ok('主动探活成功 → activation=active', probeRes.status === 200 && probeJ.activation === 'active' && probeJ.probe?.ok === true, JSON.stringify(probeJ).slice(0, 160));
+
+      const stPush = await api('/api/v1/tasks', { method: 'POST', body: { to: sr2j.agent_id, content: { title: '激活后第一封信', body: 'push works' } } });
+      ok('激活后可正常收信 202', stPush.status === 202);
+      await waitFor('推送投递到达自建收信服务', () => recvLast !== null && recvLast.task_id === stPush.json.task_id);
+      ok('推送信件内容与签名头一致', recvLast.title === '激活后第一封信');
+      const statusSelf = await fetch(`${HUB}/api/v1/self-register/status`, { headers: { authorization: `Bearer ${sr2j.agent_token}` } });
+      const statusJ = await statusSelf.json();
+      ok('status 自查 active/push', statusSelf.status === 200 && statusJ.activation === 'active' && statusJ.mode === 'push');
+    } finally {
+      recv.close();
+    }
+
     console.log('▶ MCP server（JSON-RPC over stdio，真实进程）');
     const mcpEnv = { ...process.env, KIZUNA_HUB_URL: HUB, KIZUNA_AGENT_TOKEN: senderToken, KIZUNA_BOX_URL: `http://127.0.0.1:${BOX_PORT}` };
     const mcp = spawn(process.execPath, [path.join(ROOT, 'mcp', 'kizuna-mcp')], { env: mcpEnv, stdio: ['pipe', 'pipe', 'ignore'] });
@@ -515,7 +659,10 @@ async function main() {
     ok('MCP initialize 返回 serverInfo/能力', init?.result?.serverInfo?.name === 'kizuna' && Boolean(init.result.capabilities?.tools));
     const mcpToolList = await rpc('tools/list', {}, 2);
     const toolNames = (mcpToolList?.result?.tools ?? []).map((t) => t.name);
-    ok('MCP tools/list 暴露 11 个工具', toolNames.length === 11 && toolNames.includes('kizuna_send_task') && toolNames.includes('kizuna_report_result'), toolNames.join(','));
+    ok('MCP tools/list 暴露 14 个工具（含自主注册与拉取信箱）',
+      toolNames.length === 14 && toolNames.includes('kizuna_send_task') && toolNames.includes('kizuna_report_result')
+      && toolNames.includes('kizuna_join') && toolNames.includes('kizuna_list_mailbox') && toolNames.includes('kizuna_ack_letter'),
+      toolNames.join(','));
     const who = await rpc('tools/call', { name: 'kizuna_whoami', arguments: {} }, 3);
     ok('MCP whoami 读到 hub/token', String(who?.result?.content?.[0]?.text ?? '').includes('has_agent_token": true'));
     const mcpList = await rpc('tools/call', { name: 'kizuna_list_agents', arguments: { q: '信箱' } }, 4);

@@ -359,6 +359,7 @@ async function renderAgents(main) {
     const params = new URLSearchParams();
     if (agentFilter.q) params.set('q', agentFilter.q);
     if (agentFilter.status) params.set('status', agentFilter.status);
+    params.set('activation', 'all'); // 管理台可见待激活 Agent（公开列表默认隐藏）
     params.set('limit', '200');
     let data;
     try {
@@ -379,10 +380,10 @@ async function renderAgents(main) {
       </tr></thead><tbody>
       ${data.items.map((a) => `
         <tr data-id="${esc(a.agent_id)}">
-          <td class="mono"><strong>${esc(a.agent_id)}</strong>${a.agent_card ? ' <span class="badge info" title="已发布 A2A Agent Card">A2A卡</span>' : ''}</td>
+          <td class="mono"><strong>${esc(a.agent_id)}</strong>${a.agent_card ? ' <span class="badge info" title="已发布 A2A Agent Card">A2A卡</span>' : ''}${a.activation === 'pending' ? ' <span class="badge warn" title="信箱探活未通过，暂不能收发；确认收信服务可达后可在此手工激活">待激活</span>' : ''}</td>
           <td>${esc(a.name)}</td>
           <td>${a.capability_tags.length ? a.capability_tags.map((t) => `<span class="badge dim">${esc(t)}</span>`).join(' ') : '<span class="muted">—</span>'}</td>
-          <td class="mono">${esc(a.webhook_url)}</td>
+          <td class="mono">${a.webhook_url ? esc(a.webhook_url) : '<span class="badge dim" title="拉取模式：信箱由 Hub 托管，Agent 凭令牌拉取">拉取模式</span>'}</td>
           <td>${agentStatusBadge(a.status)}${a.enabled ? '' : ' <span class="badge bad">停用</span>'}</td>
           <td><button class="btn small" data-act="toggle" data-id="${esc(a.agent_id)}" data-enabled="${a.enabled ? '1' : '0'}">${a.enabled ? '停用' : '启用'}</button></td>
           <td>
@@ -428,8 +429,14 @@ async function agentForm(agentId, onDone) {
         <textarea id="f-cap" rows="2" placeholder="报关单证预审、信用证要素核对">${esc(agent.capabilities)}</textarea></div>
       <div class="field"><label>能力标签（逗号分隔）</label>
         <input id="f-tags" value="${esc((agent.capability_tags ?? []).join(', '))}" placeholder="单证, 预审"></div>
-      <div class="field"><label>webhook 地址 *（Hub 投递目标）</label>
-        <input id="f-hook" value="${esc(agent.webhook_url)}" placeholder="http://192.168.1.20:7788"></div>
+      <div class="field"><label>webhook 地址（Hub 投递目标；留空 = 拉取模式，信箱由 Hub 托管）</label>
+        <input id="f-hook" value="${esc(agent.webhook_url)}" placeholder="http://192.168.1.20:7788（拉取模式留空）"></div>
+      ${agentId ? `
+      <div class="field"><label>激活状态（自主注册的推送 Agent 探活通过前为 pending；手工激活仅在确认收信服务可达时使用）</label>
+        <select id="f-activation">
+          <option value="active" ${agent.activation !== 'pending' ? 'selected' : ''}>active（可收发）</option>
+          <option value="pending" ${agent.activation === 'pending' ? 'selected' : ''}>pending（待激活）</option>
+        </select></div>` : ''}
       <div class="field full"><label>A2A Agent Card（JSON，可选；发布后经 /.well-known/agent-card.json?agent=编号 公开可发现；编辑时清空并保存 = 撤卡）</label>
         <textarea id="f-card" rows="4" class="mono" placeholder='{"name":"单证预审","description":"报关单证预审服务","skills":[{"id":"precheck","name":"单证预审","tags":["单证"]}]}'>${agent.agent_card ? esc(JSON.stringify(agent.agent_card, null, 2)) : ''}</textarea></div>
     </div>
@@ -453,6 +460,8 @@ async function agentForm(agentId, onDone) {
     } else if (agentId) {
       body.agent_card = null; // 编辑模式：清空 = 撤卡
     }
+    const actSel = $('#f-activation', m);
+    if (actSel) body.activation = actSel.value;
     try {
       if (agentId) {
         await api(`/api/v1/agents/${encodeURIComponent(agentId)}`, { method: 'PATCH', body });
@@ -853,6 +862,7 @@ async function renderSettings(main) {
           <select id="st-min"><option value="true" ${settings.content_minimized ? 'selected' : ''}>开启（留痕只存内容摘要）</option>
           <option value="false" ${!settings.content_minimized ? 'selected' : ''}>关闭（留痕附任务标题）</option></select></div>
         <div class="field"><label>公开安装 · 每人每分钟</label><input id="st-install-rate" type="number" min="1" max="600" value="${settings.public_install_per_minute}"></div>
+        <div class="field"><label>自主注册 · 每人每分钟</label><input id="st-selfregister-rate" type="number" min="1" max="600" value="${settings.self_register_per_minute}"></div>
         <div class="field"><label>演示沙箱 · 每人每分钟</label><input id="st-demo-rate" type="number" min="1" max="600" value="${settings.demo_per_minute}"></div>
         <div class="field full"><label>限流白名单（IP 或 CIDR，逗号/换行分隔；命中的来源不受限额约束——用于社区机器人、官方巡检、自有固定出口）</label>
           <textarea id="st-allow" rows="3" class="mono" placeholder="1.2.3.4, 10.0.0.0/8, 2001:db8::/32">${esc((settings.rate_limit_allowlist ?? []).join(', '))}</textarea>
@@ -889,6 +899,7 @@ async function renderSettings(main) {
         content_minimized: $('#st-min').value === 'true',
       };
       body.public_install_per_minute = Number($('#st-install-rate').value);
+      body.self_register_per_minute = Number($('#st-selfregister-rate').value);
       body.demo_per_minute = Number($('#st-demo-rate').value);
       body.rate_limit_allowlist = $('#st-allow').value.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
       body.quota_contact = $('#st-contact').value.trim();

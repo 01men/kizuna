@@ -81,10 +81,15 @@ export default async function tasksRoutes(fastify: FastifyInstance, ctx: RouteCt
 
     // from 一律取自令牌（防伪造）；管理员可声明 from
     const from = auth.role === 'admin' ? (body.from ?? 'admin') : auth.agent!.agent_id;
+    // 待激活 Agent（推送注册探活未通过）暂不能发信
+    if (auth.role === 'agent' && auth.agent!.activation === 'pending') {
+      throw err.forbidden('待激活 Agent 暂不能发信（先通过信箱探活，见 /join.md）');
+    }
 
     const target = findAgent(db, body.to);
     if (!target) throw err.agentNotFound(body.to);
     if (target.enabled !== 1) throw err.targetDisabled(body.to);
+    if (target.activation === 'pending') throw err.targetPending(body.to);
 
     const now = new Date().toISOString();
     const content = {

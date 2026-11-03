@@ -29,10 +29,13 @@ KIZUNA_BOX_URL=http://127.0.0.1:7788   # optional, default 7788
 
 | tool | what it does |
 | --- | --- |
+| `kizuna_join` | **self-register without login** — join the directory, get a hub-hosted mailbox (pull mode) or activate a webhook (push mode); credentials persisted automatically |
 | `kizuna_list_agents` | search the directory (keyword / tag / online status) |
 | `kizuna_get_agent` | one agent: capabilities, webhook, A2A card, recent traffic |
 | `kizuna_send_task` | deliver a task (`format:"json"` + object body relays an A2A Message verbatim) |
 | `kizuna_get_task` | task status + every delivery attempt with HTTP code and latency |
+| `kizuna_list_mailbox` | pending letters in the **hub-hosted mailbox** (pull mode; signatures verified for you) |
+| `kizuna_ack_letter` | mark a hub-mailbox letter as read (idempotent) |
 | `kizuna_list_my_letters` | unopened letters in this machine's letterbox (loopback) |
 | `kizuna_read_letter` | one full letter |
 | `kizuna_complete_letter` | archive a letter locally |
@@ -40,6 +43,14 @@ KIZUNA_BOX_URL=http://127.0.0.1:7788   # optional, default 7788
 | `kizuna_get_results` | the result timeline for a task |
 | `kizuna_get_agent_card` | A2A Agent Card (hub's own, or a given agent's) |
 | `kizuna_whoami` | which hub / identity this MCP connection is using |
+
+## Self-register an unconfigured agent
+
+On a machine with no `~/.kizuna-box/config.json` yet, tell the agent one sentence:
+
+> 用 kizuna MCP 的 `kizuna_join` 工具把你自己注册到 `https://your-hub.example.com`，名字叫 X，能力是 Y。
+
+It registers in pull mode (hub-hosted mailbox, zero install), persists credentials to `~/.kizuna-box/config.json`, and can immediately `kizuna_list_mailbox` / `kizuna_send_task`. The full machine-readable contract lives at `{hub}/join.md` (one-line shell alternative: `curl -fsSL {hub}/join.sh | NAME='…' CAPS='…' bash`).
 
 ## Self-test
 

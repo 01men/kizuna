@@ -8,9 +8,12 @@ export interface CreateAgentInput {
   name?: string;
   capabilities?: string;
   capability_tags?: string[];
+  /** webhook 可为空：空 = 拉取模式，信箱由 Hub 托管（v0.4 自主注册） */
   webhook_url?: string;
   /** A2A Agent Card（对象，原样存储；null/缺省 = 不发布） */
   agent_card?: Record<string, unknown> | null;
+  /** 激活状态：推送注册（带 webhook）先 pending，探活通过转 active；缺省 active */
+  activation?: 'active' | 'pending';
 }
 
 export interface CreateAgentResult {
@@ -18,6 +21,7 @@ export interface CreateAgentResult {
   agent_token: string;
   endpoint_secret: string;
   webhook_url: string;
+  activation: 'active' | 'pending';
 }
 
 /** A2A Agent Card 最小校验：对象 + name 字符串；≤64KB；其余字段原样保留（A2A 规格演进不设障） */
@@ -40,11 +44,12 @@ export function createAgent(db: DB, input: CreateAgentInput): CreateAgentResult 
   const name = (input.name ?? '').trim();
   const webhook = (input.webhook_url ?? '').trim();
   if (!name) throw err.validation('缺少 name');
-  if (!/^https?:\/\/.+/.test(webhook)) throw err.validation('webhook_url 必须是 http/https 地址');
+  if (webhook && !/^https?:\/\/.+/.test(webhook)) throw err.validation('webhook_url 必须是 http/https 地址');
   if ((input.capabilities ?? '').length > 2000) throw err.validation('capabilities 过长（≤2000）');
   const tags = Array.isArray(input.capability_tags) ? input.capability_tags : [];
   if (tags.length > 32) throw err.validation('capability_tags 最多 32 个');
   const card = validateAgentCard(input.agent_card);
+  const activation: 'active' | 'pending' = input.activation === 'pending' ? 'pending' : 'active';
 
   const now = new Date().toISOString();
   const agentToken = newAgentToken();
@@ -52,8 +57,8 @@ export function createAgent(db: DB, input: CreateAgentInput): CreateAgentResult 
   db.prepare(
     `INSERT INTO agents
        (agent_id, name, capabilities, capability_tags, webhook_url, endpoint_secret,
-        agent_token, enabled, status, last_seen_at, created_at, updated_at, agent_card)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'unknown', NULL, ?, ?, ?)`,
+        agent_token, enabled, status, activation, last_seen_at, created_at, updated_at, agent_card)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'unknown', ?, NULL, ?, ?, ?)`,
   ).run(
     agentId,
     name,
@@ -62,9 +67,10 @@ export function createAgent(db: DB, input: CreateAgentInput): CreateAgentResult 
     webhook,
     endpointSecret,
     agentToken,
+    activation,
     now,
     now,
     card === null ? null : JSON.stringify(card),
   );
-  return { agent_id: agentId, agent_token: agentToken, endpoint_secret: endpointSecret, webhook_url: webhook };
+  return { agent_id: agentId, agent_token: agentToken, endpoint_secret: endpointSecret, webhook_url: webhook, activation };
 }

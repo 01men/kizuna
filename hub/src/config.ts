@@ -16,6 +16,8 @@ export interface HubConfig {
   logLevel: string;
   /** 公开免登录安装（社区落地页用）：false 时 /install/self 关闭 */
   publicInstall: boolean;
+  /** Agent 自主注册（免登录一句话接入）：false 时 /api/v1/self-register 与 /join.* 关闭 */
+  selfRegister: boolean;
   /** 允许跨域来源（逗号分隔；默认包含 GitHub Pages） */
   corsOrigins: string[];
   /** 公开端点（安装/演示）每 IP 每分钟限额；0 表示用设置页的值 */
@@ -71,6 +73,7 @@ export function loadConfig(): HubConfig {
     boxSourcePath: resolveBoxSource(),
     logLevel: process.env.KIZUNA_LOG_LEVEL ?? 'info',
     publicInstall: (process.env.KIZUNA_PUBLIC_INSTALL ?? 'true') !== 'false',
+    selfRegister: (process.env.KIZUNA_SELF_REGISTER ?? 'true') !== 'false',
     corsOrigins: (process.env.KIZUNA_CORS_ORIGINS ??
       'https://01men.github.io,http://127.0.0.1:8099,http://localhost:8099')
       .split(',')

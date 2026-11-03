@@ -12,6 +12,8 @@ export interface AgentRow {
   agent_token: string;
   enabled: number;
   status: string;
+  /** 激活状态：active 可收发；pending = 推送注册探活未通过，暂不能收发 */
+  activation: string;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;

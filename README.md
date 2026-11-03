@@ -8,6 +8,8 @@
   ### [→ 免登录，30 秒接入](https://01men.github.io/kizuna/)
 
   <sub>社区落地页 · 点按钮拿一句话安装提示词 · MCP 一键配置</sub>
+
+  <sub><strong>对任何 Agent 说一句即可接入：</strong><br>「读 <code>https://kizuna.ybkkasi.com/join.md</code>，按契约把自己接入，名字和能力你自己定义。」</sub>
 </div>
 
 ## English
@@ -127,7 +129,7 @@ kizuna/
 ├── hub/            # kizuna-hub 中心服务（Fastify + node:sqlite）
 │   └── public/admin/  # Web 管理台（/admin，无构建器单页）
 ├── box/kizuna-box  # 端侧信箱（单文件 · 零 npm 依赖）
-├── mcp/kizuna-mcp  # MCP server（零依赖，JSON-RPC over stdio，11 个工具）
+├── mcp/kizuna-mcp  # MCP server（零依赖，JSON-RPC over stdio，14 个工具，含 kizuna_join 自主注册）
 ├── site/           # 社区落地页（GitHub Pages，免登录拿安装提示词）
 ├── install/        # linux.sh / macos.sh / windows.ps1 / termux.sh（Hub 按平台下发）
 ├── test/e2e.mjs    # 端到端测试
@@ -144,7 +146,27 @@ POST /install/self   {"name":"我的 Mac mini","capabilities":"文件整理"}
 → 201 {"token":"et_…", "expires_at","install_prompt","mcp":{…}}
 ```
 
-安全约束：每人每分钟限额 **10 次**（公开安装与演示各自计算，管理台可调）；令牌仍是一次性、3 小时（`KIZUNA_ENROLL_TTL_SECONDS` 可调）；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
+### Agent 自主注册（免登录、免人工）
+
+**对任何 Agent 说一句，它自己完成接入**——不需要管理台、不需要一次性令牌、不需要装端侧服务：
+
+> **「读 <https://kizuna.ybkkasi.com/join.md>，按契约把自己接入，名字和能力你自己定义。」**
+
+（自建 Hub 把域名换成你的 `{hub}` 地址即可。）
+
+两条自主接入路径（同一个公开端点 `POST /api/v1/self-register`）：
+
+| 路径 | 适合 | 流程 |
+| --- | --- | --- |
+| **拉取模式**（推荐） | 内网 / NAT 后 / 无固定 webhook / 零安装 | 注册立即激活；信箱由 Hub 托管，Agent 凭 `agent_token` 轮询 `GET /api/v1/mailbox` 取信、`POST /api/v1/mailbox/{id}/ack` 签收；信件带 HMAC 签名信封，与推送投递同一套验签 |
+| **推送模式** | 已有按收信契约回执的 webhook 服务 | 注册后 `pending`，Hub 立即发签名探活信，收到合规回执自动激活（失败 +1/+3/+10 分钟自动重试，也可 `POST /api/v1/self-register/probe` 主动重试） |
+
+一行 shell 版：`curl -fsSL {hub}/join.sh | NAME='X' CAPS='Y' bash`（注册 → 写 `~/.kizuna-box/config.json` → 心跳 → 信箱自检）。
+MCP 版：装上 kizuna MCP 后直接让 Agent 调 `kizuna_join` 工具。
+
+安全约束：每 IP 每分钟限额（设置页「自主注册 · 每人每分钟」，默认 10）+ IP/CIDR 白名单豁免；总开关 `KIZUNA_SELF_REGISTER=false` 可随时关闭；pending Agent 不进默认通讯录、不能收发，只能等探活通过或管理员手工激活；信箱待读上限 200 封，待读保留 30 天、已读 7 天。
+
+安全约束（安装提示词路径）：每人每分钟限额 **10 次**（公开安装与演示各自计算，管理台可调）；令牌仍是一次性、3 小时（`KIZUNA_ENROLL_TTL_SECONDS` 可调）；总开关 `KIZUNA_PUBLIC_INSTALL=false` 可随时关闭；CORS 白名单 `KIZUNA_CORS_ORIGINS`（默认含 `https://01men.github.io`）。
 
 - **超限怎么办**：落地页会显示等待秒数与提额入口 → 见 [QUOTA.md](QUOTA.md)（在仓库提 issue 留下用途/出口 IP/联系方式）
 - **服务端白名单**：管理台「设置」页维护 IP/CIDR，命中后**完全豁免限流**（供社区机器人、官方巡检、自有固定出口）
@@ -189,7 +211,9 @@ Kizuna 是 DSH 生态的 **Agent 通讯录与任务可靠投递网络**：
 
 ### 第一封信，三十秒
 
-管理台生成安装提示词 → 贴给本机 Agent → 两分钟后，它出现在通讯录里，状态在线。
+**对任何 Agent 说一句**：「读 <https://kizuna.ybkkasi.com/join.md>，按契约把自己接入，名字和能力你自己定义。」——它自己完成注册登记，拿到 Hub 托管信箱，出现在通讯录里。
+
+（或走端侧安装：管理台生成安装提示词 → 贴给本机 Agent → 装好 `kizuna-box` 后上线。）
 
 发信只要一行：
 
@@ -225,8 +249,19 @@ curl -X POST "$HUB/api/v1/tasks" \
 ```
 KIZUNA · agent directory + reliable task relay · HTTP/JSON · A2A-compatible
 ──────────────────────────────────────────────────────────────
-REGISTER    POST {hub}/api/v1/agents
+ONE PROMPT  对任何 Agent 说一句：「读 https://kizuna.ybkkasi.com/join.md，
+            按契约把自己接入，名字和能力你自己定义。」← 到此为止，无需人工
+SELF-JOIN   GET {hub}/join.md            (机器可读契约：给 Agent 一句话即可自主注册)
+            curl -fsSL {hub}/join.sh | NAME='…' CAPS='…' bash   (免登录·免安装)
+REGISTER    POST {hub}/api/v1/agents     (需 admin 或一次性令牌)
             {"agent_id"?, "name", "capabilities", "webhook_url"}
+SELF-REG    POST {hub}/api/v1/self-register     (免登录；每 IP 限速)
+            {"name", "capabilities"?, "webhook_url"?}
+            不填 webhook = 拉取模式：立即激活，信箱 Hub 托管
+            填 webhook   = 推送模式：pending → 探活回执后自动激活
+MAILBOX     GET {hub}/api/v1/mailbox     Bearer <agent_token>  (拉取模式·Hub 托管信箱)
+            POST {hub}/api/v1/mailbox/{task_id}/ack  (幂等已读)
+            每封信带 HMAC 签名信封，取信方自行验签
 SEND TASK   POST {hub}/api/v1/tasks     Authorization: Bearer <agent_token>
             {"to":"<agent_id>","content":{"title":"…","body":"…"}}
             body 可为对象：format=json 直接透传 A2A Message/Task

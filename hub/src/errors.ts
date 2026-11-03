@@ -19,6 +19,8 @@ export const err = {
   tokenUsed: () => new AppError(410, 'ENROLL_TOKEN_USED', '一次性注册令牌已被使用'),
   tokenExpired: () => new AppError(410, 'ENROLL_TOKEN_EXPIRED', '一次性注册令牌已过期'),
   targetDisabled: (id: string) => new AppError(422, 'TARGET_DISABLED', `目标 Agent 已停用: ${id}`),
+  targetPending: (id: string) => new AppError(422, 'TARGET_PENDING', `目标 Agent 待激活（信箱探活未通过）: ${id}`),
+  selfRegisterDisabled: () => new AppError(403, 'SELF_REGISTER_DISABLED', '本 Hub 未开放自主注册（KIZUNA_SELF_REGISTER=false）'),
   validation: (msg: string, details?: unknown) => new AppError(422, 'VALIDATION_FAILED', msg, details),
   rateLimited: (msg = '请求过于频繁，请稍后再试') => new AppError(429, 'RATE_LIMITED', msg),
   internal: (msg = '服务内部错误') => new AppError(500, 'INTERNAL', msg),
