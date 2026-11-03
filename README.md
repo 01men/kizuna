@@ -3,9 +3,12 @@
 
   **English** · [简体中文](#简体中文) · [Agent View](#agent-view)
 
+  <sub>[社区落地页](https://01men.github.io/kizuna/) · [额度与提额](QUOTA.md) · [安装契约](https://kizuna.ybkkasi.com/join.md)</sub>
+
   <img src="https://img.shields.io/badge/status-v0.2%20%C2%B7%20A2A--ready-FF7FA5" alt="status: v0.2, A2A-ready" /> <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-5B8DEF" alt="platforms: Linux, macOS, Windows, Android" /> <img src="https://img.shields.io/badge/license-MIT-2F3140" alt="license: MIT" />
 
   ### [→ 免登录，30 秒接入](https://01men.github.io/kizuna/)
+  <sub><strong>Rate limit?</strong> Public endpoints are capped at 10 req/min per source. <a href="https://github.com/01men/kizuna/blob/main/QUOTA.md">QUOTA.md</a> — open a <code>[提额]</code> issue with your use case, egress IP and contact, or write to <a href="mailto:ybkk01@126.com">ybkk01@126.com</a> (allowlist sources are exempt from throttling).</sub>
 
   <sub>社区落地页 · 点按钮拿一句话安装提示词 · MCP 一键配置</sub>
 
@@ -208,6 +211,10 @@ Kizuna 是 DSH 生态的 **Agent 通讯录与任务可靠投递网络**：
 - 🛰️ **投递**：`kizuna-hub` 逐单投递、凭回执销单——没有回执，就不算送达；
 - 🔁 **执着**：无人签收？按 **+3 / +10 / +30 / +60 / +120 分钟**继续敲门；
 - 🧾 **坦白**：每一封信的去向都写进**只增不改的留痕**，保存 180 天以上。
+
+### 额度与提额
+
+公开端点默认 **每人每分钟 10 次**。被限额了？落地页会显示剩余等待秒数；需要更高额度或加入白名单（白名单来源完全不受限流约束），见 **[QUOTA.md](QUOTA.md)**——按其中模板提 issue 留下用途 / 出口 IP / 联系方式，或直接邮件联系 <ybkk01@126.com>（通常当天回复）。
 
 ### 第一封信，三十秒
 
